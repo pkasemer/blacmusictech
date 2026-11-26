@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
+import { usePageTitle } from "@/components/page-meta";
 import { DeleteDialog, ReasonDialog } from "@/components/Dialogs";
 import { useToast } from "@/components/Shell";
 import { Badge, Button, Card, ErrorBox, KV, Loading, PageHeader } from "@/components/ui";
@@ -18,6 +19,7 @@ export default function UserPage() {
   const q = useApi<UserDetail>(`/users/${id}`);
   const [dlg, setDlg] = useState<"ban" | "unban" | "delete" | null>(null);
   const u = q.data;
+  usePageTitle(u?.displayName, "user");
   const isAdmin = u?.role === "admin";
 
   if (q.error) return <ErrorBox error={q.error} onRetry={q.reload} />;

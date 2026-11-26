@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { Badge, Empty, ErrorBox, Input, Loading, PageHeader, Pagination, Select, Table, Td, Th } from "@/components/ui";
 import { qs } from "@/lib/api";
@@ -12,7 +13,8 @@ const LIMIT = 25;
 
 export default function UsersPage() {
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState("");
+  const params = useSearchParams();
+  const [status, setStatus] = useState(params.get("status") ?? "");
   const [role, setRole] = useState("");
   const [offset, setOffset] = useState(0);
   const term = useDebounced(q);

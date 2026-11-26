@@ -22,6 +22,7 @@ interface User {
   lastSeenAt?: string;
 }
 interface Artist {
+  avatarImageId?: string;
   id: string;
   name: string;
   bio: string;
@@ -48,6 +49,9 @@ interface Track {
   genre: string;
 }
 interface Release {
+  coverImageId?: string;
+  releaseDate?: string;
+  publishAt?: string;
   id: string;
   artistId: string;
   title: string;
@@ -60,7 +64,16 @@ interface Release {
   createdAt: string;
   publishedAt?: string;
 }
+interface Group {
+  id: string;
+  title: string;
+  description: string;
+  position: number;
+  isActive: boolean;
+  playlistIds: string[];
+}
 interface Playlist {
+  coverImageId?: string;
   id: string;
   name: string;
   description: string;
@@ -93,7 +106,7 @@ export interface Mock {
   server: Server;
   /** Requests the mock saw, newest last (for tests). */
   log: { method: string; path: string; xff?: string; auth?: string }[];
-  state: { users: User[]; artists: Artist[]; releases: Release[]; tracks: Track[]; playlists: Playlist[]; audit: Audit[] };
+  state: { users: User[]; artists: Artist[]; releases: Release[]; tracks: Track[]; playlists: Playlist[]; audit: Audit[]; groups: Group[] };
   listen(port: number): Promise<number>;
   close(): Promise<void>;
 }
@@ -192,7 +205,7 @@ function seedData(now: number) {
       releases.push(rel);
       const count = type === "single" ? 1 : 3 + Math.floor(r() * 5);
       for (let t = 0; t < count; t++) {
-        tracks.push({ id: `trk_${id.slice(4)}_${t}`, releaseId: id, title: `${pick(WORDS)} ${pick(WORDS)}`, trackNumber: t + 1, durationMs: 120_000 + Math.floor(r() * 150_000), explicit: r() > 0.85, genre: rel.genre });
+        tracks.push({ id: `trk_${id.slice(4).replace(/_/g, "")}x${t}`, releaseId: id, title: `${pick(WORDS)} ${pick(WORDS)}`, trackNumber: t + 1, durationMs: 120_000 + Math.floor(r() * 150_000), explicit: r() > 0.85, genre: rel.genre });
       }
     }
   });
@@ -207,7 +220,13 @@ function seedData(now: number) {
     { id: 1, at: iso(now - 5 * DAY), actor: { id: "usr_admin", email: MOCK_ADMIN_EMAIL }, action: "artist.ban", targetType: "artist", targetId: "art_007", targetLabel: "Kofi Beats", reason: "Copyright complaint" },
     { id: 2, at: iso(now - 3 * DAY), actor: { id: "usr_admin", email: MOCK_ADMIN_EMAIL }, action: "user.ban", targetType: "user", targetId: "usr_0005", targetLabel: "spam@example.com", reason: "Spam uploads" },
   ];
-  return { users, artists, releases, tracks, playlists, audit };
+  const groups: Group[] = [
+    { id: "workout", title: "Workout", description: "Songs to move to.", position: 10, isActive: true, playlistIds: ["pl_workout", "pl_new"] },
+    { id: "chill", title: "Chill", description: "Slow it down.", position: 20, isActive: true, playlistIds: ["pl_chill", "pl_workout"] },
+    { id: "coming-soon", title: "Coming soon", description: "", position: 30, isActive: false, playlistIds: [] },
+  ];
+  audit.push({ id: 3, at: iso(now - 1.2 * DAY), actor: { id: "usr_admin", email: MOCK_ADMIN_EMAIL }, action: "import.create", targetType: "import", targetId: "imp_errors", targetLabel: "Import", reason: "", details: { keyName: "Catalogue loader", rightsBasis: "Permission from the artist, confirmed by the Blac Music team", tracks: 3 } });
+  return { users, artists, releases, tracks, playlists, audit, groups };
 }
 
 class HttpErr extends Error {
@@ -222,6 +241,9 @@ export function createMock(opts: MockOptions = {}): Mock {
   const state = seedData(now);
   let auditSeq = 100;
   const log: Mock["log"] = [];
+  let listenPort = 0;
+  const images = new Map<string, { owner: string; size: number; ready: boolean }>();
+  const mediaUrl = (id: string, size = "medium") => `http://127.0.0.1:${listenPort}/v1/media/${id}/${size}.jpg`;
 
   const access = new Map<string, { userId: string; exp: number }>();
   const refresh = new Map<string, { userId: string; revoked: boolean }>();
@@ -274,6 +296,7 @@ export function createMock(opts: MockOptions = {}): Mock {
   const artistRow = (a: Artist) => {
     const owner = a.ownerUserId ? getUser(a.ownerUserId) : undefined;
     return {
+      imageUrl: a.avatarImageId ? mediaUrl(a.avatarImageId) : undefined,
       id: a.id, name: a.name, verification: a.verification, flagged: a.flagged, banned: !!a.ban || !!owner?.ban,
       ownerUserId: a.ownerUserId, ownerEmail: owner?.email,
       releaseCount: state.releases.filter((r) => r.artistId === a.id).length, followerCount: a.followerCount, createdAt: a.createdAt,
@@ -283,8 +306,8 @@ export function createMock(opts: MockOptions = {}): Mock {
   const releaseRow = (r: Release) => {
     const a = state.artists.find((x) => x.id === r.artistId);
     return {
-      id: r.id, title: r.title, type: r.type, artistId: r.artistId, artistName: a?.name ?? "", visibility: r.visibility, takenDown: !!r.takedown,
-      trackCount: releaseTracks(r.id).length, publishedAt: r.publishedAt, createdAt: r.createdAt,
+      id: r.id, title: r.title, type: r.type, kind: r.type === "single" ? "single" : releaseTracks(r.id).length <= 6 ? "ep" : "album", artistId: r.artistId, artistName: a?.name ?? "", visibility: r.visibility, takenDown: !!r.takedown,
+      previousVisibility: r.takedown ? r.prevVisibility : undefined, coverUrl: r.coverImageId ? mediaUrl(r.coverImageId) : undefined, trackCount: releaseTracks(r.id).length, publishedAt: r.publishedAt ?? null, createdAt: r.createdAt,
     };
   };
   const trackPublic = (t: Track) => {
@@ -293,7 +316,9 @@ export function createMock(opts: MockOptions = {}): Mock {
   };
   const playlistRow = (p: Playlist) => ({
     id: p.id, name: p.name, description: p.description, isPublic: p.isPublic, isFeatured: p.isFeatured, trackCount: p.trackIds.length, updatedAt: p.updatedAt,
-    groups: p.isFeatured ? ["Home"] : [],
+    published: p.isPublic && p.isFeatured, playableTrackCount: p.trackIds.filter((id) => { const t = state.tracks.find((x) => x.id === id); return t && trackPublic(t); }).length,
+    coverUrl: p.coverImageId ? mediaUrl(p.coverImageId) : undefined,
+    groups: state.groups.filter((g) => g.playlistIds.includes(p.id)).map((g) => ({ id: g.id, title: g.title })),
   });
   const playlistItems = (p: Playlist) =>
     p.trackIds.map((tid, i) => {
@@ -306,6 +331,11 @@ export function createMock(opts: MockOptions = {}): Mock {
   // Plays per day, derived from a seeded generator so charts look alive and stay stable.
   const dayCount = (metric: string, dayStart: number): number => {
     const t0 = dayStart;
+    if (metric === "searches" || metric === "searches_no_results") {
+      const rr = rng(Math.floor(t0 / DAY) + 99);
+      const total = Math.floor(900 + rr() * 500 + (Math.floor(t0 / DAY) % 7 >= 5 ? 300 : 0));
+      return metric === "searches" ? total : Math.floor(total * (0.08 + rr() * 0.05));
+    }
     if (metric === "plays") {
       const rr = rng(Math.floor(t0 / DAY));
       return Math.floor(300 + rr() * 500 + (Math.floor(t0 / DAY) % 7 >= 5 ? 250 : 0));
@@ -317,6 +347,80 @@ export function createMock(opts: MockOptions = {}): Mock {
   };
   const utcDay = (t: number) => Math.floor(t / DAY) * DAY;
 
+  // ---- audio uploads: parts arrive at /mock-storage/up/{id}/{n}; after complete a "worker" makes the track ~1.5 s later
+  interface Upload {
+    id: string; releaseId: string; title: string; genre: string; trackNumber?: number; explicit: boolean; filename: string; sizeBytes: number;
+    status: "pending" | "queued" | "processing" | "ready" | "failed"; partSize: number; partCount: number; multipart: boolean;
+    got: Map<number, number>; readyAt?: number; trackId?: string; error?: string;
+  }
+  const uploads = new Map<string, Upload>();
+  const PART = 8 * 1024 * 1024;
+  const settle = () => {
+    const now2 = Date.now();
+    for (const u of uploads.values()) {
+      if (u.status === "queued" && u.readyAt && now2 >= u.readyAt - 700) u.status = "processing";
+      if ((u.status === "queued" || u.status === "processing") && u.readyAt && now2 >= u.readyAt) {
+        if (u.filename.toLowerCase().includes("broken")) {
+          u.status = "failed";
+          u.error = "the file could not be read as audio";
+          continue;
+        }
+        const n = releaseTracks(u.releaseId).length;
+        const tr: Track = { id: "trk_" + randomBytes(10).toString("hex"), releaseId: u.releaseId, title: u.title, trackNumber: u.trackNumber ?? n + 1, durationMs: 150_000 + (u.sizeBytes % 90_000), explicit: u.explicit, genre: u.genre };
+        state.tracks.push(tr);
+        u.trackId = tr.id;
+        u.status = "ready";
+      }
+    }
+  };
+  const uploadView = (u: Upload) => ({ id: u.id, status: u.status, releaseId: u.releaseId, title: u.title, genre: u.genre || undefined, trackNumber: u.trackNumber, explicit: u.explicit, filename: u.filename, sizeBytes: u.sizeBytes, partSize: u.multipart ? u.partSize : undefined, partCount: u.multipart ? u.partCount : undefined, trackId: u.trackId, error: u.error });
+  // uploads that are not (yet) tracks, for the release page
+  const uploadsOf = (rid: string) => { settle(); return [...uploads.values()].filter((u) => u.releaseId === rid && u.status !== "ready").map(uploadView); };
+  const partTargets = (u: Upload, only?: number[]) => Array.from({ length: u.partCount }, (_, i) => i + 1).filter((n) => !only || only.includes(n)).map((n) => ({ number: n, url: `http://127.0.0.1:${listenPort}/mock-storage/up/${u.id}/${n}` }));
+  const partSizeOf = (u: Upload, n: number) => (n === u.partCount ? u.sizeBytes - u.partSize * (u.partCount - 1) : u.partSize);
+
+  // ---- import keys and bulk import runs
+  interface Key { id: string; name: string; prefix: string; createdBy: string; createdAt: string; expiresAt: string; revokedAt: string | null; lastUsedAt: string | null }
+  const day = (d: number) => new Date(now + d * DAY).toISOString();
+  const keys: Key[] = [
+    { id: "key_active", name: "Catalogue loader", prefix: "blac_imp_Qx7pLm", createdBy: MOCK_ADMIN_EMAIL, createdAt: day(-3), expiresAt: day(27), revokedAt: null, lastUsedAt: day(-0.05) },
+    { id: "key_old", name: "October test", prefix: "blac_imp_a91kTz", createdBy: MOCK_ADMIN_EMAIL, createdAt: day(-40), expiresAt: day(-10), revokedAt: null, lastUsedAt: day(-12) },
+    { id: "key_gone", name: "Shared with partner", prefix: "blac_imp_Mm20Pd", createdBy: MOCK_ADMIN_EMAIL, createdAt: day(-20), expiresAt: day(60), revokedAt: day(-2), lastUsedAt: null },
+  ];
+  interface Job {
+    jobId: string; status: "pending" | "processing" | "completed" | "completed_with_errors" | "failed" | "cancelled"; artist: string; artistId?: string; type: "single" | "album"; visibility: "draft" | "public";
+    titles: string[]; failTitles: string[]; skipTitles: string[]; createdAt: string; startedAt: string | null; finishedAt: string | null; doneAtStart: number;
+  }
+  const someArtist = state.artists[0]!;
+  const someRelease = state.releases[0]!;
+  const jobs: Job[] = [
+    { jobId: "imp_running", status: "processing", artist: "Judas Rapkwonledge", artistId: someArtist.id, type: "single", visibility: "draft", titles: Array.from({ length: 12 }, (_, i) => `Track ${i + 1}`), failTitles: [], skipTitles: ["Track 2"], createdAt: day(-0.02), startedAt: day(-0.015), finishedAt: null, doneAtStart: 4 },
+    { jobId: "imp_errors", status: "completed_with_errors", artist: someArtist.name, artistId: someArtist.id, type: "single", visibility: "public", titles: ["Example Song", "Other Song", "Third Song"], failTitles: ["Other Song"], skipTitles: ["Third Song"], createdAt: day(-1.2), startedAt: day(-1.19), finishedAt: day(-1.18), doneAtStart: 3 },
+    { jobId: "imp_waiting", status: "pending", artist: "New Band", type: "album", visibility: "draft", titles: ["One", "Two"], failTitles: [], skipTitles: [], createdAt: day(-0.2), startedAt: null, finishedAt: null, doneAtStart: 0 },
+    { jobId: "imp_old", status: "completed", artist: someArtist.name, artistId: someArtist.id, type: "album", visibility: "draft", titles: ["A", "B", "C", "D"], failTitles: [], skipTitles: [], createdAt: day(-9), startedAt: day(-9), finishedAt: day(-8.99), doneAtStart: 4 },
+  ];
+  const jobView = (j: Job, full: boolean) => {
+    // a running job finishes one more track every few seconds
+    const done = j.status === "processing" ? Math.min(j.titles.length, j.doneAtStart + Math.floor((Date.now() - now) / 4000)) : j.status === "pending" || j.status === "cancelled" ? 0 : j.titles.length;
+    const rows = j.titles.map((title, i) => {
+      let status: string = i < done ? "created" : j.status === "processing" && i === done ? "processing" : "waiting";
+      if (status === "created" && j.failTitles.includes(title)) status = "failed";
+      if (status === "created" && j.skipTitles.includes(title)) status = "skippedDuplicate";
+      return { title, status, releaseId: status === "created" || status === "skippedDuplicate" ? someRelease.id : undefined, duration: status === "created" ? "3:05" : undefined, durationSeconds: status === "created" ? 185 : undefined };
+    });
+    const count = (s: string) => rows.filter((r) => r.status === s).length;
+    const finished = j.status === "processing" && done === j.titles.length;
+    const status = finished ? (count("failed") ? "completed_with_errors" : "completed") : j.status;
+    return {
+      jobId: j.jobId, status, artist: j.artist, artistId: j.artistId, type: j.type, visibility: j.visibility, totalTracks: j.titles.length,
+      created: count("created"), skippedDuplicate: count("skippedDuplicate"), failed: count("failed"), remaining: count("waiting") + count("processing"),
+      bytesStored: count("created") * 6_900_000, createdAt: j.createdAt, startedAt: j.startedAt, finishedAt: finished ? new Date().toISOString() : j.finishedAt,
+      results: full ? rows : undefined,
+      errors: full ? rows.filter((r) => r.status === "failed").map((r) => ({ title: r.title, file: "07.mp3", code: "corrupt_audio", message: "could not read this file as audio" })) : null,
+      warnings: full && j.jobId === "imp_errors" ? ["The artist picture could not be used."] : undefined,
+    };
+  };
+
   const routes = (req: IncomingMessage, url: URL, body: Record<string, unknown>, actor: User): { status: number; data?: unknown } => {
     const m = req.method ?? "GET";
     const p = url.pathname.replace(/^\/v1\/admin/, "");
@@ -324,6 +428,42 @@ export function createMock(opts: MockOptions = {}): Mock {
     let mt: RegExpMatchArray | null;
     const ok = (data: unknown, status = 200) => ({ status, data });
     const none = { status: 204 } as const;
+
+    // ------------------------------------------------------------ server (storage and load), read only
+    if (m === "GET" && p === "/system") {
+      const GB = 1024 ** 3;
+      const usage = (totalBytes: number, usedBytes: number) => ({ totalBytes, usedBytes, freeBytes: totalBytes - usedBytes, usedPercent: Math.round((usedBytes / totalBytes) * 1000) / 10 });
+      const byKind = { audioOriginals: { objects: 1240, bytes: 21 * GB }, audioPlayback: { objects: 3720, bytes: 11 * GB }, images: { objects: 890, bytes: 1.5 * GB }, other: { objects: 6, bytes: 0.2 * GB } };
+      const objectBytes = Object.values(byKind).reduce((s, k) => s + k.bytes, 0);
+      const databaseBytes = 0.6 * GB;
+      const diskUsed = 66 * GB;
+      const measured = new Date().toISOString();
+      return ok({
+        measuredAt: measured,
+        server: { cpuCount: 2, load: { "1m": 0.9, "5m": 1.1, "15m": 1.04 }, uptimeSeconds: 12 * 86_400 + 5 * 3600, memory: usage(4 * GB, 2.3 * GB), swap: usage(2 * GB, 0.1 * GB), disk: usage(80 * GB, diskUsed) },
+        storage: { measuredAt: new Date(Date.now() - 25 * 60_000).toISOString(), objects: Object.values(byKind).reduce((s, k) => s + k.objects, 0), objectBytes, byKind, databaseBytes, otherBytes: diskUsed - objectBytes - databaseBytes },
+        topArtists: state.artists.slice(0, 6).map((a, i) => ({ artistId: a.id, name: a.name, tracks: 40 - i * 6, bytes: Math.round((7.5 - i) * GB) })),
+        work: { uploads: { pending: 1, queued: 3, processing: 1, failedLast24h: 2, oldestQueuedSeconds: 340 }, imports: { awaitingFiles: 1, processing: 1 }, emails: { waiting: 0, failedLast24h: 0 }, push: { waiting: 4, failedLast24h: 0 } },
+        lastSampleAt: new Date(Date.now() - 3 * 60_000).toISOString(),
+        alerts: [{ level: "warning", code: "disk_low", message: "The disk is 82.5% full." }],
+      });
+    }
+    if (m === "GET" && p === "/system/history") {
+      const hours = q.get("hours") === null ? 24 : Number(q.get("hours"));
+      need(Number.isInteger(hours) && hours >= 1 && hours <= 720, 422, "validation_error", "hours must be 1-720");
+      const stepSeconds = Math.max(300, Math.ceil((hours * 3600) / 300 / 300) * 300);
+      const step = stepSeconds * 1000;
+      const last = Math.floor(Date.now() / step) * step;
+      const n = Math.floor((hours * 3600_000) / step);
+      const points = [];
+      for (let i = n - 1; i >= 0; i--) {
+        if (i > n * 0.35 && i < n * 0.45) continue; // the worker was down for a while
+        const rr = rng(Math.floor((last - i * step) / step));
+        const diskUsedBytes = Math.round((66 - i * (stepSeconds / 86_400) * 0.3) * 1024 ** 3);
+        points.push({ at: new Date(last - i * step).toISOString(), load: Math.round((0.5 + rr() * 1.4) * 100) / 100, memoryUsedPercent: Math.round((50 + rr() * 15) * 10) / 10, diskUsedBytes, diskFreeBytes: 80 * 1024 ** 3 - diskUsedBytes, uploadsWaiting: rr() > 0.85 ? Math.floor(rr() * 6) : 0 });
+      }
+      return ok({ hours, stepSeconds, points });
+    }
 
     // ------------------------------------------------------------ stats
     if (m === "GET" && p === "/stats/overview") {
@@ -347,7 +487,7 @@ export function createMock(opts: MockOptions = {}): Mock {
     }
     if (m === "GET" && p === "/stats/timeseries") {
       const metric = q.get("metric") ?? "";
-      need(["signups", "artists", "releases", "plays"].includes(metric), 400, "bad_request", "unknown metric");
+      need(["signups", "artists", "releases", "plays", "searches", "searches_no_results"].includes(metric), 400, "bad_request", "unknown metric");
       const from = utcDay(Date.parse(q.get("from") ?? "") || Date.now() - 29 * DAY);
       const to = utcDay(Date.parse(q.get("to") ?? "") || Date.now());
       need(to >= from && (to - from) / DAY <= 366, 400, "bad_request", "range must be 1-366 days");
@@ -475,6 +615,15 @@ export function createMock(opts: MockOptions = {}): Mock {
         need(typeof body.bio === "string" && body.bio.length <= 1000, 422, "validation_error", "bio must be at most 1000 characters");
         a!.bio = body.bio as string;
       }
+      if (body.imageId !== undefined) {
+        const cid = String(body.imageId);
+        if (cid === "") a!.avatarImageId = undefined;
+        else {
+          const im = images.get(cid);
+          need(im && im.ready && im.owner === actor.id, 422, "validation_error", "the picture must be a finished image uploaded by you");
+          a!.avatarImageId = cid;
+        }
+      }
       addAudit(actor, "artist.update", "artist", a!.id, a!.name, "", { fields: Object.keys(body) });
       return ok(artistRow(a!));
     }
@@ -498,10 +647,19 @@ export function createMock(opts: MockOptions = {}): Mock {
       const a = state.artists.find((x) => x.id === mt![1]);
       need(a, 404, "not_found", "artist not found");
       const d = body.decision;
-      need(d === "approve" || d === "reject" || d === "revoke", 400, "bad_request", "decision must be approve, reject or revoke");
+      need(d === "approve" || d === "verify" || d === "reject" || d === "revoke", 400, "bad_request", "decision must be approve, verify, reject or revoke");
       const note = typeof body.note === "string" ? body.note.trim() : "";
-      if (d === "approve") {
+      if (d === "verify") {
+        need(!a!.ban, 409, "artist_banned", "this artist is banned");
+        need(a!.verification !== "verified", 409, "already_verified", "this artist is already verified");
+        need(note.length <= 500, 422, "validation_error", "the note is at most 500 characters");
+        a!.verification = "verified";
+        a!.verificationNote = "";
+        a!.flagged = false;
+        addAudit(actor, "artist.verify", "artist", a!.id, a!.name, note);
+      } else if (d === "approve") {
         need(a!.verification === "pending", 409, "not_pending", "no pending verification request");
+        need(note.length <= 500, 422, "validation_error", "the note is at most 500 characters");
         a!.verification = "verified";
         addAudit(actor, "artist.verify", "artist", a!.id, a!.name, note);
       } else if (d === "reject") {
@@ -562,7 +720,7 @@ export function createMock(opts: MockOptions = {}): Mock {
     if ((mt = p.match(/^\/releases\/([^/]+)$/)) && m === "GET") {
       const r = state.releases.find((x) => x.id === mt![1]);
       need(r, 404, "not_found", "release not found");
-      return ok({ ...releaseRow(r!), description: r!.description, genre: r!.genre, takedownReason: r!.takedown?.reason, takenDownAt: r!.takedown?.at, tracks: releaseTracks(r!.id).map((t) => ({ id: t.id, title: t.title, trackNumber: t.trackNumber, durationMs: t.durationMs, visibility: r!.visibility === "public" ? "public" : "draft", explicit: t.explicit, genre: t.genre })) });
+      return ok({ uploads: uploadsOf(r!.id), releaseDate: r!.releaseDate, ...releaseRow(r!), description: r!.description, genre: r!.genre, publishAt: r!.publishAt ?? null, updatedAt: r!.createdAt, artist: { id: r!.artistId, name: state.artists.find((x) => x.id === r!.artistId)?.name ?? "", banned: !!state.artists.find((x) => x.id === r!.artistId)?.ban }, takedown: r!.takedown ? { at: r!.takedown.at, reason: r!.takedown.reason, by: { id: "usr_admin", email: MOCK_ADMIN_EMAIL }, previousVisibility: r!.prevVisibility ?? "draft", byBan: false } : null, tracks: releaseTracks(r!.id).map((t) => ({ id: t.id, title: t.title, trackNumber: t.trackNumber, durationMs: t.durationMs, visibility: r!.visibility === "public" ? "public" : "draft", explicit: t.explicit, genre: t.genre })) });
     }
     if ((mt = p.match(/^\/releases\/([^/]+)$/)) && m === "PATCH") {
       const r = state.releases.find((x) => x.id === mt![1]);
@@ -573,6 +731,19 @@ export function createMock(opts: MockOptions = {}): Mock {
       }
       if (body.description !== undefined) r!.description = String(body.description).slice(0, 2000);
       if (body.genre !== undefined) r!.genre = String(body.genre).slice(0, 60);
+      if (body.releaseDate !== undefined) {
+        need(body.releaseDate === "" || /^\d{4}-\d{2}-\d{2}$/.test(String(body.releaseDate)), 422, "validation_error", "releaseDate must be YYYY-MM-DD");
+        r!.releaseDate = body.releaseDate === "" ? undefined : String(body.releaseDate);
+      }
+      if (body.coverImageId !== undefined) {
+        const cid = String(body.coverImageId);
+        if (cid === "") r!.coverImageId = undefined;
+        else {
+          const im = images.get(cid);
+          need(im && im.ready && im.owner === actor.id, 422, "validation_error", "the cover must be a finished cover image uploaded by you");
+          r!.coverImageId = cid;
+        }
+      }
       if (body.releaseType !== undefined) {
         need(body.releaseType === "single" || body.releaseType === "album", 422, "validation_error", "releaseType must be single or album");
         r!.type = body.releaseType as "single" | "album";
@@ -660,12 +831,22 @@ export function createMock(opts: MockOptions = {}): Mock {
           pl!.name = (body.name as string).trim();
         }
         if (body.description !== undefined) pl!.description = String(body.description).slice(0, 500);
+        if (body.coverImageId !== undefined) {
+          const cid = String(body.coverImageId);
+          if (cid === "") pl!.coverImageId = undefined;
+          else {
+            const im = images.get(cid);
+            need(im && im.ready && im.owner === actor.id, 422, "validation_error", "the cover must be a finished cover image uploaded by you");
+            pl!.coverImageId = cid;
+          }
+        }
         pl!.updatedAt = new Date().toISOString();
         addAudit(actor, "playlist.update", "playlist", pl!.id, pl!.name, "", { fields: Object.keys(body) });
         return ok({ ...playlistRow(pl!), items: playlistItems(pl!) });
       }
       if (m === "DELETE") {
         state.playlists.splice(state.playlists.indexOf(pl!), 1);
+        for (const g of state.groups) g.playlistIds = g.playlistIds.filter((x) => x !== pl!.id);
         addAudit(actor, "playlist.delete", "playlist", pl!.id, pl!.name);
         return none;
       }
@@ -695,6 +876,249 @@ export function createMock(opts: MockOptions = {}): Mock {
       pl!.updatedAt = new Date().toISOString();
       addAudit(actor, `playlist.${mt[2]}`, "playlist", pl!.id, pl!.name);
       return ok({ ...playlistRow(pl!), items: playlistItems(pl!) });
+    }
+
+    // ------------------------------------------- import keys and runs
+    if (p === "/api-keys" && m === "GET") return ok({ keys: [...keys].sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+    if (p === "/api-keys" && m === "POST") {
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      need(name.length >= 1 && name.length <= 60, 422, "validation_error", "name must be 1-60 characters");
+      const days = body.expiresInDays === undefined ? 30 : Number(body.expiresInDays);
+      need(Number.isInteger(days) && days >= 1 && days <= 365, 422, "validation_error", "expiresInDays must be between 1 and 365");
+      const key = "blac_imp_" + randomBytes(32).toString("base64url");
+      const k: Key = { id: "key_" + randomBytes(8).toString("hex"), name, prefix: key.slice(0, 15), createdBy: actor.email, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + days * DAY).toISOString(), revokedAt: null, lastUsedAt: null };
+      keys.push(k);
+      addAudit(actor, "apikey.create", "apikey", k.id, k.name, "", { scope: "import", expiresAt: k.expiresAt });
+      return ok({ id: k.id, name: k.name, prefix: k.prefix, scope: "import", expiresAt: k.expiresAt, key }, 201);
+    }
+    if ((mt = p.match(/^\/api-keys\/([^/]+)$/)) && m === "DELETE") {
+      const k = keys.find((x) => x.id === mt![1] && !x.revokedAt);
+      need(k, 404, "not_found", "no such active key");
+      k!.revokedAt = new Date().toISOString();
+      addAudit(actor, "apikey.revoke", "apikey", k!.id, k!.name);
+      return none;
+    }
+    if (p === "/imports" && m === "GET") return ok({ imports: [...jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20).map((j) => jobView(j, false)) });
+    if ((mt = p.match(/^\/imports\/([^/]+)$/))) {
+      const j = jobs.find((x) => x.jobId === mt![1]);
+      need(j, 404, "not_found", "no such import");
+      if (m === "GET") return ok(jobView(j!, true));
+      if (m === "DELETE") {
+        need(j!.status === "pending", 409, "not_pending", "only an import that has not started can be cancelled");
+        j!.status = "cancelled";
+        j!.finishedAt = new Date().toISOString();
+        addAudit(actor, "import.cancel", "import", j!.jobId, j!.artist);
+        return none;
+      }
+    }
+
+    // ----------------------------------------- create artist and release, audio
+    if (m === "POST" && p === "/artists") {
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      need(name.length >= 1 && name.length <= 100, 422, "validation_error", "name must be 1-100 characters");
+      need(body.bio === undefined || (typeof body.bio === "string" && body.bio.length <= 1000), 422, "validation_error", "bio must be at most 1000 characters");
+      const a: Artist = {
+        id: "art_" + randomBytes(12).toString("hex"), name, bio: String(body.bio ?? "").trim(), verification: "unverified", verificationMessage: "", verificationNote: "",
+        flagged: state.artists.some((x) => x.verification === "verified" && x.name.toLowerCase() === name.toLowerCase()), ban: null, followerCount: 0,
+        createdAt: new Date().toISOString(), quotaBytes: 0, usedBytes: 0, grants: [],
+      };
+      if (body.imageId !== undefined && body.imageId !== "") {
+        const im = images.get(String(body.imageId));
+        need(im && im.ready && im.owner === actor.id, 422, "validation_error", "the picture must be a finished image uploaded by you");
+        a.avatarImageId = String(body.imageId);
+      }
+      state.artists.push(a);
+      addAudit(actor, "artist.create", "artist", a.id, a.name);
+      return ok({
+        id: a.id, name: a.name, bio: a.bio, imageUrl: a.avatarImageId ? mediaUrl(a.avatarImageId) : undefined,
+        verification: { state: a.verification, message: "", note: "", requestedAt: null }, flagged: a.flagged, ban: null, owner: null,
+        storage: { usedBytes: 0, quotaBytes: 0 }, counts: { releases: 0, publicReleases: 0, tracks: 0, followers: 0, plays: 0 }, recentGrants: [], createdAt: a.createdAt,
+      }, 201);
+    }
+    if ((mt = p.match(/^\/artists\/([^/]+)\/releases$/)) && m === "POST") {
+      const a = state.artists.find((x) => x.id === mt![1]);
+      need(a, 404, "not_found", "artist not found");
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      need(title.length >= 1 && title.length <= 200, 422, "validation_error", "title must be 1-200 characters");
+      need(body.type === "single" || body.type === "album", 422, "validation_error", "type must be single or album");
+      need(body.releaseDate === undefined || body.releaseDate === "" || /^\d{4}-\d{2}-\d{2}$/.test(String(body.releaseDate)), 422, "validation_error", "releaseDate must be YYYY-MM-DD");
+      const rel: Release = {
+        id: "alb_" + randomBytes(12).toString("hex"), artistId: a!.id, title, type: body.type as "single" | "album", description: String(body.description ?? "").slice(0, 2000),
+        genre: String(body.genre ?? "").slice(0, 60), visibility: "draft", createdAt: new Date().toISOString(), releaseDate: body.releaseDate ? String(body.releaseDate) : undefined,
+      };
+      if (body.coverImageId !== undefined && body.coverImageId !== "") {
+        const im = images.get(String(body.coverImageId));
+        need(im && im.ready && im.owner === actor.id, 422, "validation_error", "the cover must be a finished cover image uploaded by you");
+        rel.coverImageId = String(body.coverImageId);
+      }
+      state.releases.push(rel);
+      addAudit(actor, "release.create", "release", rel.id, rel.title, "", { artistId: a!.id });
+      return ok({ uploads: [], releaseDate: rel.releaseDate, ...releaseRow(rel), description: rel.description, genre: rel.genre, publishAt: null, updatedAt: rel.createdAt, artist: { id: a!.id, name: a!.name, banned: !!a!.ban }, takedown: null, tracks: [] }, 201);
+    }
+    if ((mt = p.match(/^\/releases\/([^/]+)\/(publish|unpublish)$/)) && m === "POST") {
+      const r = state.releases.find((x) => x.id === mt![1]);
+      need(r, 404, "not_found", "release not found");
+      need(!r!.takedown, 409, "taken_down", "this release was taken down; restore it first");
+      if (mt[2] === "publish") {
+        need(releaseTracks(r!.id).length > 0, 422, "no_tracks", "add at least one track before publishing");
+        const at = typeof body.publishAt === "string" && body.publishAt ? Date.parse(body.publishAt) : NaN;
+        if (Number.isFinite(at) && at > Date.now()) {
+          r!.visibility = "scheduled";
+          r!.publishAt = new Date(at).toISOString();
+        } else {
+          r!.visibility = "public";
+          r!.publishedAt = new Date().toISOString();
+          r!.publishAt = undefined;
+        }
+      } else {
+        r!.visibility = "draft";
+        r!.publishAt = undefined;
+      }
+      addAudit(actor, `release.${mt[2]}`, "release", r!.id, r!.title);
+      return ok({ uploads: uploadsOf(r!.id), ...releaseRow(r!), description: r!.description, genre: r!.genre, publishAt: r!.publishAt ?? null, takedown: null, tracks: [] });
+    }
+    if ((mt = p.match(/^\/releases\/([^/]+)\/uploads$/)) && m === "POST") {
+      const r = state.releases.find((x) => x.id === mt![1]);
+      need(r, 404, "not_found", "release not found");
+      need(body.rightsConfirmed === true, 422, "validation_error", "confirm that you have the rights to upload this recording");
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      need(title.length >= 1 && title.length <= 200, 422, "validation_error", "title must be 1-200 characters");
+      const size = Number(body.sizeBytes);
+      need(Number.isInteger(size) && size >= 1 && size <= 2 * 1024 ** 3, 422, "validation_error", "sizeBytes must be between 1 byte and 2 GB");
+      need(typeof body.filename === "string" && body.filename.length > 0, 422, "validation_error", "filename is required");
+      const multipart = size > 2 * PART;
+      const u: Upload = {
+        id: "upl_" + randomBytes(10).toString("hex"), releaseId: r!.id, title, genre: String(body.genre ?? ""), trackNumber: typeof body.trackNumber === "number" ? body.trackNumber : undefined,
+        explicit: body.explicit === true, filename: String(body.filename), sizeBytes: size, status: "pending", partSize: PART, partCount: multipart ? Math.ceil(size / PART) : 1, multipart, got: new Map(),
+      };
+      uploads.set(u.id, u);
+      addAudit(actor, "track.upload", "release", r!.id, r!.title, "rights confirmed by the administrator", { uploadId: u.id, filename: u.filename });
+      const target = multipart
+        ? { type: "multipart", method: "PUT", partSize: u.partSize, partCount: u.partCount, parts: partTargets(u), expiresAt: new Date(Date.now() + 3_600_000).toISOString() }
+        : { type: "single", method: "PUT", url: partTargets(u)[0]!.url, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+      return ok({ ...uploadView(u), upload: target, maxBytes: 2 * 1024 ** 3 }, 201);
+    }
+    if ((mt = p.match(/^\/uploads\/([^/]+)(?:\/(parts|complete))?$/))) {
+      const u = uploads.get(mt[1]!);
+      need(u, 404, "not_found", "upload not found");
+      settle();
+      if (!mt[2] && m === "GET") return ok(uploadView(u!));
+      if (!mt[2] && m === "DELETE") {
+        uploads.delete(u!.id);
+        return none;
+      }
+      if (mt[2] === "parts" && m === "GET") {
+        need(u!.multipart, 400, "not_multipart", "this upload is a single PUT; there are no parts");
+        need(u!.status === "pending", 409, "not_pending", "this upload is no longer waiting for parts");
+        const done = [...u!.got.entries()].filter(([n, s]) => s === partSizeOf(u!, n)).map(([n]) => n);
+        const todo = Array.from({ length: u!.partCount }, (_, i) => i + 1).filter((n) => !done.includes(n));
+        return ok({ partSize: u!.partSize, partCount: u!.partCount, uploaded: done, parts: partTargets(u!, todo), expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      }
+      if (mt[2] === "complete" && m === "POST") {
+        if (u!.status !== "pending") return ok(uploadView(u!));
+        if (u!.multipart) {
+          const missing = Array.from({ length: u!.partCount }, (_, i) => i + 1).filter((n) => u!.got.get(n) !== partSizeOf(u!, n));
+          if (missing.length > 0) throw new HttpErr(409, "parts_missing", `parts missing or the wrong size: ${missing.join(", ")}`);
+        } else {
+          need((u!.got.get(1) ?? 0) > 0, 409, "not_uploaded", "the file has not been uploaded yet");
+        }
+        u!.status = "queued";
+        u!.readyAt = Date.now() + 1500;
+        return ok(uploadView(u!));
+      }
+    }
+
+    // --------------------------------------------------- sections (groups)
+    const groupOut = (g: Group) => ({ id: g.id, title: g.title, description: g.description, position: g.position, isActive: g.isActive, playlistCount: g.playlistIds.filter((id) => state.playlists.find((x) => x.id === id)?.isPublic).length, playlistIds: g.playlistIds });
+    if (m === "GET" && p === "/playlist-groups") return ok({ groups: [...state.groups].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id)).map(groupOut) });
+    if (m === "POST" && p === "/playlist-groups") {
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      need(title.length >= 1 && title.length <= 60, 422, "validation_error", "title must be 1-60 characters");
+      const id = (typeof body.id === "string" && body.id) || title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      need(!state.groups.some((g) => g.id === id), 409, "conflict", "a section with this id already exists");
+      const position = typeof body.position === "number" ? body.position : Math.max(0, ...state.groups.map((g) => g.position)) + 10;
+      const g: Group = { id, title, description: String(body.description ?? "").slice(0, 300), position, isActive: body.isActive !== false, playlistIds: [] };
+      state.groups.push(g);
+      addAudit(actor, "section.create", "section", g.id, g.title);
+      return ok(groupOut(g), 201);
+    }
+    if ((mt = p.match(/^\/playlist-groups\/([^/]+)$/))) {
+      const g = state.groups.find((x) => x.id === mt![1]);
+      need(g, 404, "not_found", "section not found");
+      if (m === "GET") return ok(groupOut(g!));
+      if (m === "PATCH") {
+        if (body.title !== undefined) {
+          need(typeof body.title === "string" && body.title.trim().length >= 1 && body.title.trim().length <= 60, 422, "validation_error", "title must be 1-60 characters");
+          g!.title = (body.title as string).trim();
+        }
+        if (body.description !== undefined) g!.description = String(body.description).slice(0, 300);
+        if (typeof body.position === "number") g!.position = body.position;
+        if (typeof body.isActive === "boolean") g!.isActive = body.isActive;
+        addAudit(actor, "section.update", "section", g!.id, g!.title, "", { fields: Object.keys(body) });
+        return ok(groupOut(g!));
+      }
+      if (m === "DELETE") {
+        state.groups.splice(state.groups.indexOf(g!), 1);
+        addAudit(actor, "section.delete", "section", g!.id, g!.title);
+        return none;
+      }
+    }
+    if ((mt = p.match(/^\/playlist-groups\/([^/]+)\/playlists$/)) && m === "PUT") {
+      const g = state.groups.find((x) => x.id === mt![1]);
+      need(g, 404, "not_found", "section not found");
+      const ids = body.playlistIds;
+      need(Array.isArray(ids) && ids.every((i) => typeof i === "string"), 400, "bad_request", "playlistIds is required (use [] to empty the section)");
+      for (const id of ids as string[]) need(state.playlists.some((x) => x.id === id), 422, "unknown_playlist", `unknown playlist ${id}`);
+      g!.playlistIds = [...new Set(ids as string[])];
+      addAudit(actor, "section.playlists", "section", g!.id, g!.title, "", { count: g!.playlistIds.length });
+      return ok(groupOut(g!));
+    }
+
+    // ------------------------------------------------------ search insights
+    const range = q.get("range") ?? "30d";
+    const rangeDays = range === "7d" ? 7 : range === "90d" ? 90 : 30;
+    const terms: { q: string; kind: string; w: number; results: number }[] = [
+      { q: "burna boy", kind: "artists", w: 95, results: 12 }, { q: "amapiano", kind: "tracks", w: 88, results: 40 }, { q: "afrobeats 2026", kind: "playlists", w: 70, results: 6 },
+      { q: "gospel worship", kind: "playlists", w: 64, results: 0 }, { q: "kampala", kind: "tracks", w: 52, results: 9 }, { q: "wizkid", kind: "artists", w: 49, results: 0 },
+      { q: "workout", kind: "playlists", w: 46, results: 3 }, { q: "chill vibes", kind: "playlists", w: 41, results: 2 }, { q: "love songs", kind: "tracks", w: 39, results: 25 },
+      { q: "podcast comedy", kind: "tracks", w: 33, results: 0 }, { q: "ugandan hits", kind: "playlists", w: 31, results: 0 }, { q: "rema calm down", kind: "tracks", w: 29, results: 0 },
+      { q: "sunrise", kind: "albums", w: 24, results: 5 }, { q: "lulu", kind: "artists", w: 22, results: 3 }, { q: "street drum", kind: "tracks", w: 20, results: 4 },
+      { q: "reggae roots", kind: "playlists", w: 17, results: 1 }, { q: "kizz daniel", kind: "artists", w: 15, results: 0 }, { q: "wedding songs", kind: "playlists", w: 14, results: 0 },
+      { q: "drill", kind: "tracks", w: 11, results: 0 }, { q: "efua beats", kind: "artists", w: 9, results: 2 },
+    ];
+    const rowFor = (tm: (typeof terms)[number], i: number) => {
+      const rr = rng(i * 7919 + rangeDays);
+      const count = Math.max(1, Math.round(tm.w * rangeDays * (0.9 + rr() * 0.3)));
+      const rising = i % 4 === 1 || i === 10 || i === 11;
+      const previousCount = Math.max(0, Math.round(count * (rising ? 0.35 : 0.85 + rr() * 0.3)));
+      return { query: tm.q, kind: tm.kind, count, noResultCount: tm.results === 0 ? count : Math.round(count * 0.04), previousCount, lastAt: new Date(Date.now() - Math.floor(rr() * 6) * 3_600_000).toISOString(), results: tm.results };
+    };
+    if (m === "GET" && p === "/search/overview") {
+      const rows = terms.map(rowFor);
+      const searches = rows.reduce((s, r) => s + r.count, 0);
+      const noRes = rows.reduce((s, r) => s + r.noResultCount, 0);
+      const prev = rows.reduce((s, r) => s + r.previousCount, 0);
+      return ok({ searches, uniqueQueries: rows.length * 37, noResultSearches: noRes, noResultRate: noRes / searches, previous: { searches: prev, noResultSearches: Math.round(noRes * 0.9) } });
+    }
+    if (m === "GET" && p === "/search/top") {
+      const kind = q.get("kind");
+      const term = (q.get("q") ?? "").toLowerCase();
+      let rows = terms.map(rowFor).filter((r) => (!kind || r.kind === kind) && (!term || r.query.includes(term)));
+      if (q.get("sort") === "rising") rows = rows.filter((r) => r.count >= 3 && r.count > r.previousCount).sort((a, b) => b.count / Math.max(1, b.previousCount) - a.count / Math.max(1, a.previousCount));
+      else rows.sort((a, b) => b.count - a.count);
+      const pg = pageOf(rows, q);
+      return ok({ total: pg.total, items: pg.rows.map((r) => ({ query: r.query, count: r.count, noResultCount: r.noResultCount, previousCount: r.previousCount, lastAt: r.lastAt })) });
+    }
+    if (m === "GET" && p === "/search/kinds") {
+      const by = new Map<string, number>(["tracks", "artists", "playlists", "albums"].map((k) => [k, 0]));
+      for (const r of terms.map(rowFor)) by.set(r.kind, (by.get(r.kind) ?? 0) + r.count);
+      return ok({ items: [...by.entries()].map(([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count) });
+    }
+    if (m === "GET" && p === "/search/no-results") {
+      const kind = q.get("kind");
+      const rows = terms.map(rowFor).filter((r) => r.results === 0 && (!kind || r.kind === kind)).sort((a, b) => b.count - a.count);
+      const pg = pageOf(rows, q);
+      return ok({ total: pg.total, items: pg.rows.map((r) => ({ query: r.query, count: r.count, lastAt: r.lastAt })) });
     }
 
     // -------------------------------------------------------- audit log
@@ -737,6 +1161,49 @@ export function createMock(opts: MockOptions = {}): Mock {
       const url = new URL(req.url ?? "/", "http://mock");
       const entry = { method: req.method ?? "", path: url.pathname + url.search, xff: req.headers["x-forwarded-for"] as string | undefined, auth: req.headers.authorization };
       log.push(entry);
+      const rawPath = url.pathname;
+      const upPart = /^\/mock-storage\/up\/([^/]+)\/(\d+)$/.exec(rawPath);
+      if (req.method === "PUT" && upPart) {
+        const up = uploads.get(upPart[1]!);
+        if (!up) return send(res, 404, { error: { code: "not_found", message: "no such upload" } });
+        up.got.set(Number(upPart[2]), Buffer.concat(chunks).length);
+        return send(res, 200);
+      }
+      if (req.method === "PUT" && rawPath.startsWith("/mock-storage/")) {
+        const id = rawPath.slice("/mock-storage/".length);
+        const im = images.get(id);
+        if (!im) return send(res, 404, { error: { code: "not_found", message: "no such upload" } });
+        im.size = Buffer.concat(chunks).length;
+        return send(res, 200);
+      }
+      if (req.method === "GET" && rawPath.startsWith("/v1/media/")) {
+        const id = rawPath.split("/")[3] ?? "x";
+        let h = 0;
+        for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360;
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${h},70%,45%)"/><stop offset="1" stop-color="hsl(${(h + 60) % 360},70%,30%)"/></linearGradient></defs><rect width="400" height="400" fill="url(#g)"/></svg>`;
+        res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=3600" });
+        return res.end(svg);
+      }
+      if (req.method === "GET" && rawPath.startsWith("/mock-audio/")) {
+        // a few seconds of a quiet tone (8 kHz, 8-bit mono WAV), pitched by the track id
+        const id = rawPath.slice("/mock-audio/".length).replace(/\.wav$/, "");
+        let h = 0;
+        for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 400;
+        const rate = 8000, secs = 8, n = rate * secs, freq = 220 + h;
+        const wav = Buffer.alloc(44 + n);
+        wav.write("RIFF", 0); wav.writeUInt32LE(36 + n, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+        wav.writeUInt32LE(rate, 24); wav.writeUInt32LE(rate, 28); wav.writeUInt16LE(1, 32); wav.writeUInt16LE(8, 34); wav.write("data", 36); wav.writeUInt32LE(n, 40);
+        for (let i = 0; i < n; i++) wav[44 + i] = 128 + Math.round(40 * Math.sin((2 * Math.PI * freq * i) / rate) * Math.min(1, i / 400, (n - i) / 400));
+        const range = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? "");
+        if (range) {
+          const a = range[1] ? Number(range[1]) : 0;
+          const b = range[2] ? Math.min(Number(range[2]), wav.length - 1) : wav.length - 1;
+          res.writeHead(206, { "Content-Type": "audio/wav", "Accept-Ranges": "bytes", "Content-Range": `bytes ${a}-${b}/${wav.length}`, "Content-Length": b - a + 1 });
+          return res.end(wav.subarray(a, b + 1));
+        }
+        res.writeHead(200, { "Content-Type": "audio/wav", "Accept-Ranges": "bytes", "Content-Length": wav.length });
+        return res.end(wav);
+      }
       let body: Record<string, unknown> = {};
       try {
         const text = Buffer.concat(chunks).toString("utf8");
@@ -787,6 +1254,31 @@ export function createMock(opts: MockOptions = {}): Mock {
         const actor = getUser(tok.userId);
         if (!actor) throw new HttpErr(401, "unauthorized", "invalid or expired access token");
         if (actor.ban) throw new HttpErr(403, "account_banned", "this account is banned");
+        if (method === "GET" && path === "/v1/genres") {
+          return send(res, 200, { genres: ["Pop", "Hip-Hop/Rap", "Afrobeats", "R&B/Soul", "Amapiano", "Dancehall", "Gospel", "Reggae", "Bongo Flava", "Other"].map((name) => ({ id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), name })) });
+        }
+        if (method === "POST" && path === "/v1/images") {
+          const size = Number(body.sizeBytes);
+          need(body.purpose === "cover" || body.purpose === "avatar", 422, "validation_error", "purpose must be avatar or cover");
+          need(size >= 1 && size <= 10 << 20, 422, "validation_error", "sizeBytes must be between 1 byte and 10 MB");
+          const id = "img_" + randomBytes(12).toString("hex");
+          images.set(id, { owner: actor.id, size: 0, ready: false });
+          return send(res, 201, { id, purpose: body.purpose, status: "pending", upload: { method: "PUT", url: `http://127.0.0.1:${listenPort}/mock-storage/${id}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
+        }
+        const imgDone = path.match(/^\/v1\/images\/(img_[a-z0-9]+)\/complete$/);
+        if (method === "POST" && imgDone) {
+          const im = images.get(imgDone[1]!);
+          if (!im || im.owner !== actor.id) throw new HttpErr(404, "not_found", "image not found");
+          if (im.size < 1) throw new HttpErr(409, "not_uploaded", "the file has not been uploaded yet");
+          im.ready = true;
+          return send(res, 200, { id: imgDone[1], purpose: "cover", status: "ready", width: 400, height: 400, urls: { small: mediaUrl(imgDone[1]!, "small"), medium: mediaUrl(imgDone[1]!), large: mediaUrl(imgDone[1]!, "large") } });
+        }
+        const pb = path.match(/^\/v1\/playback\/(trk_[A-Za-z0-9_]+)$/);
+        if (method === "GET" && pb) {
+          const tr = state.tracks.find((x) => x.id === pb[1]);
+          if (!tr || !trackPublic(tr)) throw new HttpErr(404, "not_found", "track not found");
+          return send(res, 200, { trackId: tr.id, source: "native", playback: { mode: "url", url: `http://127.0.0.1:${listenPort}/mock-audio/${tr.id}.wav`, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), quality: url.searchParams.get("quality") ?? "medium" } });
+        }
         if (method === "GET" && path === "/v1/search") {
           const term = (url.searchParams.get("q") ?? "").toLowerCase();
           if (!term) throw new HttpErr(400, "bad_request", "q is required");
@@ -820,7 +1312,8 @@ export function createMock(opts: MockOptions = {}): Mock {
       new Promise((resolve) => {
         server.listen(port, "127.0.0.1", () => {
           const addr = server.address();
-          resolve(typeof addr === "object" && addr ? addr.port : port);
+          listenPort = typeof addr === "object" && addr ? addr.port : port;
+          resolve(listenPort);
         });
       }),
     close: () => new Promise((resolve) => server.close(() => resolve())),

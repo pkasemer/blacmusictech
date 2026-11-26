@@ -15,6 +15,9 @@ let csrfToken = "";
 export function setCsrf(token: string): void {
   csrfToken = token;
 }
+export function getCsrf(): string {
+  return csrfToken;
+}
 
 // The app shell installs the real handler (a router redirect to /login).
 let onSignedOut: () => void = () => {};
@@ -55,6 +58,34 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     if (res.status === 403 && (code === "forbidden" || code === "account_banned")) onSignedOut();
     const retry = Number(res.headers.get("retry-after") ?? "");
     throw new ApiError(res.status, code, err?.message ?? `Request failed (${res.status})`, Number.isFinite(retry) ? retry : undefined);
+  }
+  return data as T;
+}
+
+/** Uploads a file as the raw request body (used for cover images). */
+export async function apiUpload<T>(path: string, file: File): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": file.type, "X-CSRF-Token": csrfToken, Accept: "application/json" },
+      body: file,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError(0, "network", "Could not reach the server. Check your connection.");
+  }
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    data = undefined;
+  }
+  if (!res.ok) {
+    const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error;
+    if (res.status === 401) onSignedOut();
+    throw new ApiError(res.status, err?.code ?? "error", err?.message ?? `Upload failed (${res.status})`);
   }
   return data as T;
 }

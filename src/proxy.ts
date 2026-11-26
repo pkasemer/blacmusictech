@@ -14,6 +14,7 @@ export function proxy(req: NextRequest) {
     dev ? "style-src 'self' 'unsafe-inline'" : `style-src 'self' 'nonce-${nonce}'`,
     "style-src-attr 'unsafe-inline'",
     `img-src 'self' data: blob: ${cfg.imageOrigins.join(" ")}`,
+    `media-src 'self' blob: ${cfg.mediaOrigins.join(" ")}`,
     "font-src 'self'",
     "connect-src 'self'",
     "object-src 'none'",
@@ -26,10 +27,8 @@ export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const open = pathname === "/login" || pathname.startsWith("/api/");
   if (!open && !req.cookies.get(cfg.cookieName)) {
-    const url = req.nextUrl.clone();
-    url.pathname = "/login";
-    url.search = "";
-    const res = NextResponse.redirect(url);
+    // Built from the configured public origin: behind nginx the request URL is the internal http address.
+    const res = NextResponse.redirect(new URL("/login", cfg.siteOrigin));
     res.headers.set("Content-Security-Policy", csp);
     return res;
   }
@@ -43,5 +42,5 @@ export function proxy(req: NextRequest) {
 }
 
 export const config = {
-  matcher: [{ source: "/((?!_next/static|_next/image|favicon.ico).*)", missing: [{ type: "header", key: "next-router-prefetch" }] }],
+  matcher: [{ source: "/((?!_next/static|_next/image|favicon.ico|logo.png|robots.txt|api/uploads/part).*)", missing: [{ type: "header", key: "next-router-prefetch" }] }],
 };

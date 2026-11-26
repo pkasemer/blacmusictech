@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const config: NextConfig = {
+  output: "standalone", // small self-contained server for the Docker image
   poweredByHeader: false,
   reactStrictMode: true,
   // Content-Security-Policy (with a per-request nonce) is set in src/proxy.ts.

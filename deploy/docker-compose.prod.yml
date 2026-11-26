@@ -1,0 +1,41 @@
+# Blac Music Admin Site, production. Runs next to the Backend stack on the same server
+# (/opt/blacmusic/admin, its own compose project) and talks to the API over the Backend's
+# private docker network, never through the public internet. Only 127.0.0.1:3100 is
+# published; nginx fronts it (deploy/nginx/blacadmin.conf).
+# Settings live in .env on the server (see deploy/env.example), never in git.
+name: blacmusic-admin
+
+services:
+  admin:
+    image: blacmusic-admin:${TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3100"
+      HOSTNAME: 0.0.0.0
+      # The API on the Backend's private network. Do NOT point this at the public https name:
+      # nginx would then overwrite the visitor's address and the API's per-IP sign-in lockout
+      # would see one address for every admin.
+      BACKEND_URL: http://api:8080
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (openssl rand -base64 48)}
+      SITE_ORIGIN: ${SITE_ORIGIN:?set SITE_ORIGIN in .env (https://...)}
+      TRUST_PROXY: "true"            # port 3100 is reachable only by nginx on this machine
+      IMAGE_ORIGINS: ${IMAGE_ORIGINS:-https://blacmusic.pkasemer.com}
+      MEDIA_ORIGINS: ${MEDIA_ORIGINS:-https://blacmedia.pkasemer.com}   # where tracks play from (the player)
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-30}
+      SESSION_ABSOLUTE_MINUTES: ${SESSION_ABSOLUTE_MINUTES:-720}
+    ports: ["127.0.0.1:3100:3100"]
+    networks: [backend]
+    mem_limit: 256m
+    read_only: true
+    tmpfs: ["/tmp", "/app/.next/cache"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  backend:
+    name: blacmusic_default   # created by the Backend stack
+    external: true

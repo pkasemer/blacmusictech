@@ -8,7 +8,7 @@ export interface Point {
 }
 
 /** A small accessible SVG line/area chart with a hover read-out. */
-export function LineChart({ points, label, color = "#6d28d9" }: { points: Point[]; label: string; color?: string }) {
+export function LineChart({ points, label, color = "#1688f8" }: { points: Point[]; label: string; color?: string }) {
   const id = useId();
   const [hover, setHover] = useState<number | null>(null);
   const W = 640;
@@ -43,8 +43,8 @@ export function LineChart({ points, label, color = "#6d28d9" }: { points: Point[
         <title id={`${id}-t`}>{`${label}: ${total.toLocaleString()} in total over ${points.length} points`}</title>
         {ticks.map((t) => (
           <g key={t}>
-            <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="#e3e6ec" strokeWidth="1" />
-            <text x={pad.l - 6} y={y(t) + 4} textAnchor="end" fontSize="14" fill="#5d6572">
+            <line x1={pad.l} x2={W - pad.r} y1={y(t)} y2={y(t)} stroke="#e5e5e9" strokeWidth="1" />
+            <text x={pad.l - 6} y={y(t) + 4} textAnchor="end" fontSize="14" fill="#777780">
               {Math.round(t).toLocaleString()}
             </text>
           </g>
@@ -52,7 +52,7 @@ export function LineChart({ points, label, color = "#6d28d9" }: { points: Point[
         <path d={area} fill={color} opacity="0.12" />
         <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
         {labelIdx.map((i) => (
-          <text key={i} x={x(i)} y={H - 6} textAnchor={i === 0 ? "start" : i === points.length - 1 ? "end" : "middle"} fontSize="14" fill="#5d6572">
+          <text key={i} x={x(i)} y={H - 6} textAnchor={i === 0 ? "start" : i === points.length - 1 ? "end" : "middle"} fontSize="14" fill="#777780">
             {points[i]!.date.slice(5)}
           </text>
         ))}

@@ -2,6 +2,7 @@
 // standard Response (cookies are read from and written to headers), so tests can call them directly.
 
 import { z } from "zod";
+import { openPart, sealPart } from "./part-token";
 import { backendFetch, errorCode, refreshTokens, revokeRefresh, type TokenPair } from "./backend";
 import { getConfig } from "./config";
 import { clientIp, csrfOk, isUnsafeMethod, originOk, Throttle } from "./guard";
@@ -158,81 +159,169 @@ async function readBody(req: Request): Promise<string | undefined | "too_large">
 }
 
 /**
+ * An authenticated conversation with the Backend on behalf of the signed-in administrator: checks the session
+ * (and, for state changes, the Origin and CSRF token), keeps the access token fresh, retries once when the
+ * Backend refuses it, and works out the cookie the answer must carry.
+ */
+class BackendSession {
+  private changed = false;
+  get sid(): string {
+    return this.s.sid;
+  }
+  constructor(
+    private s: Session,
+    private ip: string | undefined,
+  ) {}
+
+  /** Opens the session for a request, or returns the error response to send. */
+  static async open(req: Request): Promise<BackendSession | Response> {
+    const s = await sessionFromRequest(req);
+    if (!s) return fail(401, "unauthorized", "Please sign in again.", [clearCookie()]);
+    if (isUnsafeMethod(req.method)) {
+      if (!originOk(req)) return fail(403, "bad_origin", "Request origin not allowed");
+      if (!csrfOk(req, s)) return fail(403, "bad_csrf", "Invalid request token");
+    }
+    const bs = new BackendSession(s, clientIp(req));
+    if (s.accessExp - Date.now() < 30_000) {
+      const failed = await bs.refresh();
+      if (failed) return failed;
+    }
+    return bs;
+  }
+
+  private async refresh(): Promise<Response | null> {
+    const r = await refreshTokens(this.s.refresh, this.ip);
+    if (!r.ok) {
+      if (r.status === 502) return fail(502, "backend_unavailable", "The server is not reachable. Try again.");
+      return fail(401, "session_expired", "Your session has ended. Please sign in again.", [clearCookie()]);
+    }
+    this.changed = true;
+    this.s = {
+      ...this.s,
+      access: r.pair.accessToken,
+      refresh: r.pair.refreshToken,
+      accessExp: Date.parse(r.pair.expiresAt) || Date.now() + 10 * 60_000,
+    };
+    return null;
+  }
+
+  /** Calls the Backend; a refused token is rotated once and the call repeated (a 401 means nothing ran). */
+  async call(path: string, o: { method?: string; body?: string } = {}): Promise<Response | { response: Response }> {
+    try {
+      let res = await backendFetch(path, { method: o.method, body: o.body, token: this.s.access, ip: this.ip });
+      if (res.status === 401) {
+        const failed = await this.refresh();
+        if (failed) return { response: failed };
+        res = await backendFetch(path, { method: o.method, body: o.body, token: this.s.access, ip: this.ip });
+      }
+      return res;
+    } catch {
+      return { response: fail(502, "backend_unavailable", "The server is not reachable. Try again.") };
+    }
+  }
+
+  /** Cookies for the answer: cleared when the account lost its rights, refreshed when tokens rotated or time passed. */
+  async cookies(status: number, code?: string): Promise<string[]> {
+    if (status === 401 || (status === 403 && (code === "forbidden" || code === "account_banned"))) return [clearCookie()];
+    if (this.changed || Date.now() - this.s.lastSeen > TOUCH_INTERVAL_MS) return [await sessionCookie({ ...this.s, lastSeen: Date.now() })];
+    return [];
+  }
+
+  /** Reads a Backend JSON answer and turns it into the response for the browser. */
+  async reply(res: Response): Promise<Response> {
+    const text = res.status === 204 ? "" : await res.text();
+    let parsed: unknown;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // The Backend answers a route it does not have with a plain-text 404. Say so, instead of a vague 502.
+        if (res.status === 404) return fail(404, "not_available", "This feature is not available on the server yet.");
+        return fail(502, "bad_response", "Unexpected response from the server.");
+      }
+    }
+    const code = (parsed as { error?: { code?: string } } | undefined)?.error?.code;
+    const extra: Record<string, string> = {};
+    const retry = res.headers.get("retry-after");
+    if (retry) extra["Retry-After"] = retry;
+    return json(res.status, parsed, await this.cookies(res.status, code), extra);
+  }
+}
+
+/**
  * Forwards an authenticated request to the Backend with the session's bearer token.
  * `backendPath` must already be validated by the caller; `query` is passed through as given.
  */
 export async function proxyToBackend(req: Request, backendPath: string, query: string): Promise<Response> {
   if (!ALLOWED_METHODS.has(req.method)) return fail(405, "method_not_allowed", "Method not allowed");
-  let s = await sessionFromRequest(req);
-  if (!s) return fail(401, "unauthorized", "Please sign in again.", [clearCookie()]);
-  if (isUnsafeMethod(req.method)) {
-    if (!originOk(req)) return fail(403, "bad_origin", "Request origin not allowed");
-    if (!csrfOk(req, s)) return fail(403, "bad_csrf", "Invalid request token");
-  }
+  const bs = await BackendSession.open(req);
+  if (bs instanceof Response) return bs;
   const body = await readBody(req);
   if (body === "too_large") return fail(413, "too_large", "Request too large");
+  const res = await bs.call(`${backendPath}${query}`, { method: req.method, body });
+  if ("response" in res) return res.response;
+  return bs.reply(res);
+}
 
-  const ip = clientIp(req);
-  let changed = false;
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_IMAGE = 10 << 20; // the Backend's limit
 
-  const refresh = async (cur: Session): Promise<Session | Response> => {
-    const r = await refreshTokens(cur.refresh, ip);
-    if (!r.ok) {
-      if (r.status === 502) return fail(502, "backend_unavailable", "The server is not reachable. Try again.");
-      return fail(401, "session_expired", "Your session has ended. Please sign in again.", [clearCookie()]);
-    }
-    changed = true;
-    return { ...cur, access: r.pair.accessToken, refresh: r.pair.refreshToken, accessExp: Date.parse(r.pair.expiresAt) || Date.now() + 10 * 60_000 };
-  };
+/**
+ * POST /api/images?purpose=cover|avatar : upload a cover (playlist or release) or an artist picture. The browser sends the raw image; this server asks the Backend for an
+ * upload slot, puts the bytes there, and asks the Backend to validate and re-encode them. The storage address comes
+ * from the Backend's own answer, never from the browser, and the browser never needs to reach the storage host.
+ */
+export async function handleImageUpload(req: Request): Promise<Response> {
+  if (req.method !== "POST") return fail(405, "method_not_allowed", "Method not allowed");
+  const bs = await BackendSession.open(req);
+  if (bs instanceof Response) return bs;
+  const type = (req.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (!IMAGE_TYPES.has(type)) return fail(415, "unsupported_type", "Use a JPEG, PNG or WebP image.");
+  const declared = Number(req.headers.get("content-length") ?? "0");
+  if (declared > MAX_IMAGE) return fail(413, "too_large", "The image must be 10 MB or smaller.");
+  const bytes = new Uint8Array(await req.arrayBuffer());
+  if (bytes.length < 1) return fail(400, "bad_request", "No image received.");
+  if (bytes.length > MAX_IMAGE) return fail(413, "too_large", "The image must be 10 MB or smaller.");
 
-  if (s.accessExp - Date.now() < 30_000) {
-    const r = await refresh(s);
-    if (r instanceof Response) return r;
-    s = r;
+  const asked = new URL(req.url).searchParams.get("purpose");
+  const purpose = asked === "avatar" ? "avatar" : "cover";
+  const created = await bs.call("/v1/images", { method: "POST", body: JSON.stringify({ purpose, sizeBytes: bytes.length }) });
+  if ("response" in created) return created.response;
+  if (created.status !== 201) return bs.reply(created);
+  const slot = (await created.json()) as { id?: string; upload?: { method?: string; url?: string } };
+  const target = slot.upload?.url;
+  if (!slot.id || !/^img_[a-z0-9]+$/.test(slot.id) || !target || slot.upload?.method !== "PUT") {
+    return fail(502, "bad_response", "Unexpected response from the server.");
   }
-
-  const call = async (token: string): Promise<Response> =>
-    backendFetch(`${backendPath}${query}`, { method: req.method, token, body, ip });
-
-  let res: Response;
+  let storageUrl: URL;
   try {
-    res = await call(s.access);
-    if (res.status === 401) {
-      // The access token was refused (e.g. clock skew): rotate once and retry. A 401 means nothing ran.
-      const r = await refresh(s);
-      if (r instanceof Response) return r;
-      s = r;
-      res = await call(s.access);
-    }
+    storageUrl = new URL(target);
+    if (storageUrl.protocol !== "https:" && storageUrl.protocol !== "http:") throw new Error("scheme");
   } catch {
-    return fail(502, "backend_unavailable", "The server is not reachable. Try again.");
+    return fail(502, "bad_response", "Unexpected response from the server.");
   }
 
-  const cookies: string[] = [];
-  const text = res.status === 204 ? "" : await res.text();
-  let parsed: unknown;
-  if (text) {
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // The Backend answers a route it does not have with a plain-text 404. Say so, instead of a vague 502.
-      if (res.status === 404) return fail(404, "not_available", "This feature is not available on the server yet.");
-      return fail(502, "bad_response", "Unexpected response from the server.");
-    }
+  try {
+    const put = await fetch(storageUrl, { method: "PUT", body: bytes, redirect: "manual", signal: AbortSignal.timeout(60_000) });
+    if (!put.ok) return fail(502, "upload_failed", "The image could not be stored. Try again.");
+  } catch {
+    return fail(502, "upload_failed", "The image could not be stored. Try again.");
   }
 
-  // An account that lost its admin role or was banned must not keep a working session.
-  const code = (parsed as { error?: { code?: string } } | undefined)?.error?.code;
-  if (res.status === 401 || (res.status === 403 && (code === "forbidden" || code === "account_banned"))) {
-    cookies.push(clearCookie());
-  } else if (changed || Date.now() - s.lastSeen > TOUCH_INTERVAL_MS) {
-    cookies.push(await sessionCookie({ ...s, lastSeen: Date.now() }));
-  }
+  const done = await bs.call(`/v1/images/${slot.id}/complete`, { method: "POST" });
+  if ("response" in done) return done.response;
+  return bs.reply(done);
+}
 
-  const extra: Record<string, string> = {};
-  const retry = res.headers.get("retry-after");
-  if (retry) extra["Retry-After"] = retry;
-  return json(res.status, parsed, cookies, extra);
+const TRACK_ID = /^trk_[A-Za-z0-9]{1,64}$/;
+
+/** GET /api/playback/{trackId}?quality= : a short-lived link to play a track in the admin player. */
+export async function handlePlayback(req: Request, trackId: string): Promise<Response> {
+  if (req.method !== "GET") return fail(405, "method_not_allowed", "Method not allowed");
+  if (!TRACK_ID.test(trackId)) return fail(404, "not_found", "Not found");
+  const q = new URL(req.url).searchParams.get("quality");
+  const quality = q === "low" || q === "high" ? q : "medium";
+  return proxyToBackend(req, `/v1/playback/${trackId}`, `?quality=${quality}`);
 }
 
 /** /api/admin/[...path] */
@@ -251,3 +340,135 @@ export async function handleSearch(req: Request): Promise<Response> {
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? "20") || 20, 1), 50);
   return proxyToBackend(req, "/v1/search", `?q=${encodeURIComponent(q)}&limit=${limit}`);
 }
+
+// ------------------------------------------------------------------ audio uploads
+
+const RELEASE_ID = /^alb_[A-Za-z0-9_]{1,64}$/;
+const UPLOAD_ID = /^[A-Za-z0-9_-]{1,80}$/;
+const MAX_AUDIO = 2 * 1024 ** 3; // the Backend's own limit applies on top
+const MAX_PART = 16 * 1024 * 1024 + 1024;
+
+const uploadBody = z.object({
+  releaseId: z.string().regex(RELEASE_ID),
+  title: z.string().trim().min(1).max(200),
+  genre: z.string().trim().max(60).optional(),
+  trackNumber: z.number().int().min(1).max(999).optional(),
+  explicit: z.boolean().optional(),
+  filename: z.string().trim().min(1).max(255),
+  sizeBytes: z.number().int().min(1).max(MAX_AUDIO),
+  rightsConfirmed: z.literal(true),
+});
+
+interface BackendTarget {
+  type?: string;
+  url?: string;
+  partSize?: number;
+  partCount?: number;
+  parts?: { number: number; url: string }[];
+  expiresAt?: string;
+}
+
+/** Turns the Backend's presigned targets into sealed tokens the browser can hand back, never raw storage addresses. */
+async function sealTargets(sid: string, t: BackendTarget, sizeBytes: number, only?: number[]): Promise<{ number: number; token: string }[] | null> {
+  const expires = new Date(t.expiresAt ?? "");
+  if (t.type === "single" || (!t.parts && t.url)) {
+    if (!t.url) return null;
+    return [{ number: 1, token: await sealPart(sid, { url: t.url, size: sizeBytes, exact: false }, expires) }];
+  }
+  const partSize = t.partSize ?? 0;
+  const count = t.partCount ?? 0;
+  if (!t.parts || partSize < 1 || count < 1) return null;
+  const out: { number: number; token: string }[] = [];
+  for (const p of t.parts) {
+    if (only && !only.includes(p.number)) continue;
+    const size = p.number === count ? sizeBytes - partSize * (count - 1) : partSize;
+    if (size < 1 || p.number < 1 || p.number > count) return null;
+    out.push({ number: p.number, token: await sealPart(sid, { url: p.url, size, exact: true }, expires) });
+  }
+  return out;
+}
+
+/** POST /api/uploads : start uploading one audio file to a release. Returns sealed part tokens. */
+export async function handleUploadCreate(req: Request): Promise<Response> {
+  if (req.method !== "POST") return fail(405, "method_not_allowed", "Method not allowed");
+  const bs = await BackendSession.open(req);
+  if (bs instanceof Response) return bs;
+  let b: z.infer<typeof uploadBody>;
+  try {
+    const r = uploadBody.safeParse(JSON.parse(await req.text()));
+    if (!r.success) return fail(422, "validation_error", "Check the track details and confirm you have the rights to upload it.");
+    b = r.data;
+  } catch {
+    return fail(400, "bad_request", "Invalid request.");
+  }
+  const { releaseId, ...rest } = b;
+  const res = await bs.call(`/v1/admin/releases/${releaseId}/uploads`, { method: "POST", body: JSON.stringify(rest) });
+  if ("response" in res) return res.response;
+  if (res.status !== 201) return bs.reply(res);
+  const view = (await res.json()) as { id?: string; status?: string; upload?: BackendTarget; maxBytes?: number };
+  if (!view.id || !UPLOAD_ID.test(view.id) || !view.upload) return fail(502, "bad_response", "Unexpected response from the server.");
+  const sid = bsSid(bs);
+  const parts = await sealTargets(sid, view.upload, b.sizeBytes);
+  if (!parts) return fail(502, "bad_response", "Unexpected response from the server.");
+  const out = { id: view.id, status: view.status ?? "pending", plan: { type: view.upload.type === "multipart" ? "multipart" : "single", partSize: view.upload.partSize, partCount: parts.length, parts } };
+  return json(201, out, await bs.cookies(201));
+}
+
+/** GET /api/uploads/{id}/parts?size= : what is still missing for a resumable upload, with fresh sealed tokens. */
+export async function handleUploadParts(req: Request, id: string): Promise<Response> {
+  if (req.method !== "GET") return fail(405, "method_not_allowed", "Method not allowed");
+  if (!UPLOAD_ID.test(id)) return fail(404, "not_found", "Not found");
+  const size = Number(new URL(req.url).searchParams.get("size"));
+  if (!Number.isInteger(size) || size < 1 || size > MAX_AUDIO) return fail(400, "bad_request", "size is required");
+  const bs = await BackendSession.open(req);
+  if (bs instanceof Response) return bs;
+  const res = await bs.call(`/v1/admin/uploads/${id}/parts`);
+  if ("response" in res) return res.response;
+  if (res.status !== 200) return bs.reply(res);
+  const v = (await res.json()) as BackendTarget & { uploaded?: number[] };
+  // the total number of parts comes from the file size: the Backend's own count may only cover what is still missing
+  const total = v.partSize && v.partSize > 0 ? Math.ceil(size / v.partSize) : 0;
+  const parts = await sealTargets(bsSid(bs), { ...v, type: "multipart", partCount: total }, size);
+  if (!parts) return fail(502, "bad_response", "Unexpected response from the server.");
+  return json(200, { partSize: v.partSize, partCount: v.partCount, uploaded: v.uploaded ?? [], parts }, await bs.cookies(200));
+}
+
+/**
+ * PUT /api/uploads/part?token= : sends one part (raw bytes, streamed, never held in memory) to the presigned
+ * storage URL sealed in the token. The size must match what the token allows.
+ */
+export async function handleUploadPart(req: Request): Promise<Response> {
+  if (req.method !== "PUT") return fail(405, "method_not_allowed", "Method not allowed");
+  const bs = await BackendSession.open(req);
+  if (bs instanceof Response) return bs;
+  const token = new URL(req.url).searchParams.get("token") ?? "";
+  const claim = await openPart(token, bsSid(bs));
+  if (!claim) return fail(403, "bad_token", "This upload link is not valid any more. Start the upload again.");
+  const len = Number(req.headers.get("content-length") ?? "");
+  if (!Number.isInteger(len) || len < 1 || len > MAX_PART) return fail(411, "length_required", "The part size is missing or too large.");
+  if (claim.exact ? len !== claim.size : len > claim.size) return fail(422, "wrong_size", "This part is not the size the upload expects.");
+  if (!req.body) return fail(400, "bad_request", "No data received.");
+  try {
+    const put = await fetch(claim.url, {
+      method: "PUT",
+      body: req.body,
+      headers: { "Content-Length": String(len) },
+      redirect: "manual",
+      signal: AbortSignal.timeout(120_000),
+      // streams the request body straight through
+      duplex: "half",
+    } as RequestInit);
+    if (!put.ok) return fail(502, "upload_failed", "The audio could not be stored. Try again.");
+  } catch {
+    return fail(502, "upload_failed", "The audio could not be stored. Try again.");
+  }
+  return json(204, undefined, await bs.cookies(204));
+}
+
+/** GET /api/genres : the genres a release may use. */
+export async function handleGenres(req: Request): Promise<Response> {
+  if (req.method !== "GET") return fail(405, "method_not_allowed", "Method not allowed");
+  return proxyToBackend(req, "/v1/genres", "");
+}
+
+const bsSid = (bs: { sid: string }): string => bs.sid;

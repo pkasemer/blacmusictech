@@ -13,6 +13,8 @@ export interface ServerConfig {
   cookieName: string;
   secureCookie: boolean;
   imageOrigins: string[];
+  /** where the audio player may load tracks from (the object storage host) */
+  mediaOrigins: string[];
 }
 
 const DEV_SECRET = "dev-only-session-secret-do-not-use-in-production";
@@ -38,6 +40,10 @@ export function getConfig(): ServerConfig {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  const media = (process.env.MEDIA_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   return {
     production,
     backendUrl,
@@ -51,5 +57,6 @@ export function getConfig(): ServerConfig {
     cookieName: secure ? "__Host-blac_admin" : "blac_admin",
     secureCookie: secure,
     imageOrigins: [new URL(backendUrl).origin, ...extra],
+    mediaOrigins: [new URL(backendUrl).origin, ...media, ...(production ? [] : ["http://localhost:9000", "http://127.0.0.1:9000"])],
   };
 }

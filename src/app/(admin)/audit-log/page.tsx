@@ -10,7 +10,7 @@ import { useApi, useDebounced } from "@/lib/useApi";
 const LIMIT = 50;
 
 function tone(action: string): "red" | "green" | "amber" | "blue" | "gray" {
-  if (/delete|ban$|takedown|reject|revoke|login_failed/.test(action)) return "red";
+  if (/delete|ban$|takedown|reject|revoke|cancel|login_failed/.test(action)) return "red";
   if (/unban|restore|verify|publish$/.test(action) && !/unpublish/.test(action)) return "green";
   if (/update|grant|items|create/.test(action)) return "blue";
   return "gray";
@@ -37,7 +37,7 @@ export default function AuditLogPage() {
         <Input aria-label="Administrator" className="max-w-[14rem]" placeholder="Administrator email" value={actor} onChange={(e) => reset(setActor)(e.target.value)} />
         <Select aria-label="Action" value={action} onChange={(e) => reset(setAction)(e.target.value)}>
           <option value="">Any action</option>
-          {["login", "login_failed", "user", "artist", "release", "track", "playlist"].map((a) => (
+          {["login", "login_failed", "user", "artist", "release", "track", "playlist", "section", "upload", "apikey", "import"].map((a) => (
             <option key={a} value={a}>
               {a === "login" || a === "login_failed" ? a.replace("_", " ") : `${a} actions`}
             </option>
@@ -45,7 +45,7 @@ export default function AuditLogPage() {
         </Select>
         <Select aria-label="Target" value={targetType} onChange={(e) => reset(setTargetType)(e.target.value)}>
           <option value="">Any target</option>
-          {["user", "artist", "release", "track", "playlist"].map((a) => (
+          {["user", "artist", "release", "track", "playlist", "section", "apikey", "import"].map((a) => (
             <option key={a} value={a}>
               {a}
             </option>

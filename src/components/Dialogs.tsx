@@ -5,7 +5,7 @@ import { ApiError } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
 import { Button, ErrorBox, Field, Input, Loading, Textarea } from "./ui";
 
-export function Modal({ open, title, onClose, children, wide }: { open: boolean; title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+export function Modal({ open, title, onClose, children, wide, dismissable = true }: { open: boolean; title: string; onClose: () => void; children: ReactNode; wide?: boolean; dismissable?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   useEffect(() => {
@@ -18,15 +18,22 @@ export function Modal({ open, title, onClose, children, wide }: { open: boolean;
     <dialog
       ref={ref}
       aria-labelledby={titleId}
-      onClose={onClose}
-      onClick={(e) => {
-        if (e.target === ref.current) onClose();
+      onCancel={(e) => {
+        if (!dismissable) e.preventDefault();
       }}
-      className={`m-auto w-[calc(100%-2rem)] rounded-xl border border-line bg-white p-0 shadow-xl backdrop:bg-black/40 ${wide ? "max-w-2xl" : "max-w-lg"}`}
+      onClose={() => {
+        // some browsers close on a second Escape even when cancel is refused: open it again
+        if (!dismissable && open) ref.current?.showModal();
+        else onClose();
+      }}
+      onClick={(e) => {
+        if (dismissable && e.target === ref.current) onClose();
+      }}
+      className={`pop-in m-auto w-[calc(100%-2rem)] rounded-card border border-line bg-panel p-0 text-ink shadow-pop ${wide ? "max-w-2xl" : "max-w-lg"}`}
     >
       {open && (
         <div className="p-5">
-          <h2 id={titleId} className="mb-3 text-lg font-semibold">
+          <h2 id={titleId} className="mb-3 text-xl font-semibold">
             {title}
           </h2>
           {children}

@@ -43,8 +43,85 @@ Checks: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`.
 | Destructive actions | Ban, takedown and revoke ask for a reason. Delete shows what will be removed (the Backend's deletion preview), and needs the exact name/email typed plus a reason. The Backend writes the audit entry in the same transaction; the audit page is read only. |
 | Production guard | The site refuses to start without a 32+ character `SESSION_SECRET` and an `https://` `SITE_ORIGIN`. |
 
-Not in v1: password reset, 2FA (recommended next), podcast shows, the signed-out showcase, Home shelves and import options
+## Managing the app's content
+
+- **Sections** (`/sections`): the titled shelves on the app's Home screen (the Backend calls them playlist groups). Create a
+  section, add playlists to it, reorder, hide or delete it. A playlist can be in several sections: tick them on the playlist
+  page, or add playlists from the section page.
+- **Playlists**: each one needs a **cover image**. Upload it on the playlist page; the browser sends the picture to this site's
+  server, which hands it to the Backend (checked and resized there), so the browser never talks to the storage host. JPEG, PNG or
+  WebP, up to 10 MB.
+- **Listen**: a play button on every track (playlist editor, track search, release page) plays it in a small player at the bottom.
+  It uses a short-lived link from the Backend, does not count as a listen in the stats, and only works for public tracks. The
+  audio host must be allowed by the page policy: `MEDIA_ORIGINS` (production: `https://blacmedia.pkasemer.com`).
+- **Search insights** (`/search-insights`): what listeners search for, what grows fastest, and what they could not find. Needs the
+  Backend's search logging (see `admin-search-insights-request.md` in the notes folder); until then the page says the feature is
+  not available yet.
+
+Not in v1: password reset, 2FA (recommended next), podcast shows, the signed-out showcase and import options
 (their Backend endpoints exist and can be added as pages).
+
+## Creating artists and releases
+
+An administrator can add an artist who does not exist yet (a catalog artist with no account) and publish releases for them:
+
+- **New artist** (Artists page, sidebar New menu, or inside the new-release wizard): name, bio, picture. Artists with the same
+  name are shown first, so duplicates are a deliberate choice.
+- **New release** (Releases page, an artist's page, dashboard, sidebar, Ctrl+K): choose or create the artist, then type, title,
+  genre, date and cover. It starts as a draft.
+- **Add tracks** on the release page: drop audio files, check the titles, confirm the rights (recorded in the audit log) and
+  upload. Files go through this site's server in parts (resumable, with progress); the Backend converts them and the tracks appear.
+  Reorder tracks, then **Publish** now or schedule a date.
+
+The upload goes browser -> this site -> storage with short-lived sealed links, so the browser never talks to the storage host and
+cannot make the server call an address of its choosing. Behind nginx the `/api/uploads/part` path needs a 20 MB body limit
+(already in `deploy/nginx/blacadmin.conf`). Needs the Backend's "create artist and release" admin routes
+(`admin-create-artist-release-request.md` in the notes folder).
+
+## Bulk import: keys and runs
+
+- **API keys** (`/api-keys`): a script imports a catalogue with a key, never with your password. A key opens only the Backend's
+  `/v1/admin/imports` routes, but through them it can create artists and releases and **publish them**, so give it the shortest
+  expiry that works and revoke it when done. The whole key is shown **once**, in a dialog that cannot be dismissed by accident;
+  the site keeps it only in that dialog's memory (not in storage, the address bar or logs). Only the prefix is listed afterwards.
+- **Imports** (`/imports`): the latest 20 runs with progress, refreshed every 15 s while one is unfinished. A run's page shows each
+  track, what failed and why, warnings, links to the releases, and who started it with the rights statement (from the audit log).
+  A run that has not started can be cancelled. Reading a run never includes upload links.
+- Contract: `backend-api-bulk-import.md` in the notes folder. Set the Backend's `ADMIN_SITE_URL` to get release links in the
+  script's answers (the site builds its own links, so it works without it).
+
+## Verified artists
+
+On an artist's page, **Mark as verified** gives the badge, whether or not the artist asked (a waiting request is approved or
+rejected there, or in the Verifications queue). **Revoke verification** removes it and needs a reason. A banned artist cannot be
+verified, and the dialog warns when another verified artist has the same name. Verifying without a request needs the Backend's
+`decision: "verify"`; on an older server the dialog says so.
+
+## Server (storage and load)
+
+`/server` (sidebar "System", or `G` then `H`) shows the machine that runs Blac Music: disk, memory, processor load and swap;
+what uses the disk (original uploads, playback copies, pictures, database, everything else); the artists using the most space;
+waiting uploads, imports, emails and push notifications; and history for 24 hours, 7 days or 30 days. The current figures
+refresh every minute. Alerts and gauge colours come from the Backend's `alerts`; the site keeps no thresholds of its own.
+A break in a history line means no reading was taken.
+
+It is **read only**. There are no cleanup or delete actions over the API; clean up with the Backend's server scripts.
+Needs the Backend's `GET /v1/admin/system` and `/v1/admin/system/history`.
+
+## Design system ("Quiet Productivity meets Creative Studio")
+
+- **Tokens** live in `src/app/globals.css` (`@theme`): neutral canvas/surface/border colours, accent colours for action (blue),
+  brand (orange), success, warning, creative (violet) and teal; 13 px body type with Inter; 8 px controls, 14 px cards;
+  borders instead of shadows, 120-200 ms transitions (and none when the person asks for reduced motion).
+- **Shell**: a rounded desktop window with a fixed 208 px sidebar (brand, New, search, grouped navigation, favourites, recent,
+  profile), a 52 px toolbar (breadcrumbs, favourite, search, share, more) and the workspace. Below 1024 px the sidebar becomes a
+  drawer; phones get a stacked layout.
+- **Studio workspace** (playlist and section editors): library on the left (collapses to a rail on narrower windows), the working
+  canvas in the middle, a resizable and collapsible inspector on the right, and a docked player at the bottom.
+- **Components**: `src/components/ui.tsx` (buttons, fields, cards, KPI tiles, badges, progress, tables), `menu.tsx` (tooltips,
+  dropdown and right-click menus), `Dialogs.tsx`, `Workspace.tsx`, `CommandPalette.tsx`, one icon set (`icons.tsx`, Lucide).
+- **Keyboard**: Ctrl/Cmd+K search and jump, `?` shortcuts, Space play/pause, `G` then a letter to go to a page; menus use the
+  arrow keys, Home/End and Esc. Favourites and recent items are kept per browser.
 
 ## Layout
 
@@ -63,6 +140,5 @@ final shapes in `backend-api-admin.md` there. When they differ, change `src/lib/
 
 ## Production
 
-Needs a Node host (not a static site) behind HTTPS and, ideally, nginx. Environment: `BACKEND_URL` (server-to-server),
-`SESSION_SECRET`, `SITE_ORIGIN=https://admin.<domain>`, `TRUST_PROXY=true` behind nginx, `IMAGE_ORIGINS` (where artwork is served from).
-Optionally restrict `/v1/admin/` in the Backend's nginx to this site's server address. Nothing here is deployed yet.
+Deployed with docker compose next to the Backend on the same VPS: see [deploy/README.md](deploy/README.md)
+(`deploy/ship.sh`, nginx site, env file, DNS and certificate steps).

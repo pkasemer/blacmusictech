@@ -1,9 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
+import { Modal } from "@/components/Dialogs";
+import { IPlus } from "@/components/icons";
+import { NewArtistForm } from "@/components/NewArtistForm";
+import { useToast } from "@/components/Shell";
 import { VerificationBadge } from "@/components/badges";
-import { Badge, Empty, ErrorBox, Input, Loading, PageHeader, Pagination, Select, Table, Td, Th } from "@/components/ui";
+import { Badge, Button, Empty, ErrorBox, Input, Loading, PageHeader, Pagination, Select, Table, Td, Th } from "@/components/ui";
 import { qs } from "@/lib/api";
 import { fmtDate, fmtNum } from "@/lib/format";
 import type { ArtistList } from "@/lib/types";
@@ -12,6 +17,13 @@ import { useApi, useDebounced } from "@/lib/useApi";
 const LIMIT = 25;
 
 export default function ArtistsPage() {
+  const params = useSearchParams();
+  const router = useRouter();
+  const toast = useToast();
+  const [creating, setCreating] = useState(params.get("new") === "1");
+  useEffect(() => {
+    if (params.get("new") === "1") router.replace("/artists");
+  }, [params, router]);
   const [q, setQ] = useState("");
   const [verification, setVerification] = useState("");
   const [status, setStatus] = useState("");
@@ -21,7 +33,32 @@ export default function ArtistsPage() {
 
   return (
     <>
-      <PageHeader title="Artists" subtitle="Artist profiles, including catalog artists without an account" />
+      <PageHeader
+        title="Artists"
+        subtitle="Artist profiles, including catalog artists without an account"
+        actions={
+          <>
+            <Link href="/releases/new">
+              <Button>New release</Button>
+            </Link>
+            <Button variant="primary" onClick={() => setCreating(true)}>
+              <IPlus size={14} /> New artist
+            </Button>
+          </>
+        }
+      />
+      <Modal open={creating} title="New artist" onClose={() => setCreating(false)} wide>
+        {creating && (
+          <NewArtistForm
+            onCancel={() => setCreating(false)}
+            onUseExisting={(a) => router.push(`/artists/${a.id}`)}
+            onCreated={(a) => {
+              toast("Artist created. Add their first release next.");
+              router.push(`/artists/${a.id}`);
+            }}
+          />
+        )}
+      </Modal>
       <div className="mb-4 flex flex-wrap gap-2">
         <Input aria-label="Search artists" className="max-w-xs" placeholder="Search by name" value={q} onChange={(e) => (setQ(e.target.value), setOffset(0))} />
         <Select aria-label="Verification" value={verification} onChange={(e) => (setVerification(e.target.value), setOffset(0))}>

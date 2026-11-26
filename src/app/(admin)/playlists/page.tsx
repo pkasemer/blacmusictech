@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useId, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useId, useState } from "react";
 import { Modal } from "@/components/Dialogs";
 import { useToast } from "@/components/Shell";
 import { Badge, Button, Empty, ErrorBox, Field, Input, Loading, PageHeader, Pagination, Select, Table, Td, Textarea, Th } from "@/components/ui";
 import { api, ApiError, qs } from "@/lib/api";
 import { fmtDate } from "@/lib/format";
+import { editorialMessage } from "@/lib/editorial";
 import type { PlaylistDetail, PlaylistList } from "@/lib/types";
 import { useApi, useDebounced } from "@/lib/useApi";
 
@@ -66,7 +67,12 @@ export default function PlaylistsPage() {
   const [q, setQ] = useState("");
   const [published, setPublished] = useState("");
   const [offset, setOffset] = useState(0);
-  const [creating, setCreating] = useState(false);
+  const params = useSearchParams();
+  const router = useRouter();
+  const [creating, setCreating] = useState(params.get("new") === "1");
+  useEffect(() => {
+    if (params.get("new") === "1") router.replace("/playlists");
+  }, [params, router]);
   const term = useDebounced(q);
   const list = useApi<PlaylistList>(`/playlists${qs({ q: term, published, limit: LIMIT, offset })}`);
 
@@ -89,7 +95,7 @@ export default function PlaylistsPage() {
           <option value="false">Unpublished</option>
         </Select>
       </div>
-      {list.error && (list.error.code === "editorial_not_configured" ? <ErrorBox error="The editorial account is not configured on the server (EDITORIAL_OWNER_EMAIL)." /> : <ErrorBox error={list.error} onRetry={list.reload} />)}
+      {list.error && <ErrorBox error={editorialMessage(list.error.code) ?? list.error} onRetry={list.reload} />}
       {!list.data && !list.error && <Loading />}
       {list.data && list.data.playlists.length === 0 && <Empty>No playlists yet. Create the first one.</Empty>}
       {list.data && list.data.playlists.length > 0 && (
@@ -98,6 +104,7 @@ export default function PlaylistsPage() {
             <thead>
               <tr>
                 <Th>Playlist</Th>
+                <Th>Sections</Th>
                 <Th>State</Th>
                 <Th>Tracks</Th>
                 <Th>Updated</Th>
@@ -107,13 +114,38 @@ export default function PlaylistsPage() {
               {list.data.playlists.map((p) => (
                 <tr key={p.id} className="hover:bg-canvas/50">
                   <Td>
-                    <Link href={`/playlists/${p.id}`} className="font-medium hover:underline">
-                      {p.name}
-                    </Link>
-                    {p.description && <div className="max-w-md truncate text-xs text-muted">{p.description}</div>}
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded bg-canvas text-[10px] text-amber-700">
+                        {p.coverUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element -- served by the API's own media host
+                          <img src={p.coverUrl} alt="" className="h-full w-full object-cover" />
+                        ) : (
+                          "no cover"
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <Link href={`/playlists/${p.id}`} className="font-medium hover:underline">
+                          {p.name}
+                        </Link>
+                        {p.description && <div className="max-w-md truncate text-xs text-muted">{p.description}</div>}
+                      </div>
+                    </div>
                   </Td>
-                  <Td>{p.isPublic ? <Badge tone="green">Published</Badge> : <Badge>Unpublished</Badge>}</Td>
-                  <Td className="tabular-nums">{p.trackCount}</Td>
+                  <Td>
+                    {p.groups && p.groups.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {p.groups.map((g) => (
+                          <Link key={g.id} href={`/sections/${g.id}`}>
+                            <Badge tone="blue">{g.title}</Badge>
+                          </Link>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted">none</span>
+                    )}
+                  </Td>
+                  <Td>{p.published ?? p.isPublic ? <Badge tone="green">Published</Badge> : <Badge>Unpublished</Badge>}</Td>
+                  <Td className="tabular-nums">{p.trackCount}{p.playableTrackCount !== undefined && p.playableTrackCount < p.trackCount && <span className="text-xs text-amber-700"> ({p.playableTrackCount} playable)</span>}</Td>
                   <Td className="text-muted">{fmtDate(p.updatedAt)}</Td>
                 </tr>
               ))}
