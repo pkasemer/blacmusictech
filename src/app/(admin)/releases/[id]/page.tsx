@@ -5,16 +5,21 @@ import { useParams, useRouter } from "next/navigation";
 import { useId, useState } from "react";
 import { VisibilityBadge } from "@/components/badges";
 import { CoverUpload } from "@/components/CoverUpload";
+import { FeaturedArtistsCard } from "@/components/FeaturedArtists";
+import { MakeSingleDialog } from "@/components/MakeSingle";
+import { TrackMetadataCard } from "@/components/TrackMetadataCard";
+import { canFeature, featureError } from "@/lib/featured";
 import { DeleteDialog, Modal, ReasonDialog } from "@/components/Dialogs";
-import { IArrowDown, IArrowUp, IBan, IMore, ITrash } from "@/components/icons";
+import { IArrowDown, IArrowUp, IBan, IMore, IStar, ITrash } from "@/components/icons";
 import { Menu } from "@/components/menu";
 import { usePageTitle } from "@/components/page-meta";
 import { PlayButton } from "@/components/Player";
 import { useToast } from "@/components/Shell";
 import { TrackUploader } from "@/components/TrackUploader";
-import { Badge, Button, Card, ErrorBox, Field, IconButton, Input, KV, Loading, PageHeader, Select, Table, Td, Textarea, Th } from "@/components/ui";
+import { Badge, Button, Card, ErrorBox, Field, IconButton, Input, KV, Loading, PageHeader, Select, Textarea } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { fmtBytes, fmtDate, fmtDateTime, fmtDuration } from "@/lib/format";
+import { usableGenre } from "@/lib/taxonomy";
 import type { GenreList, ReleaseDeletionPreview, ReleaseDetail, TrackRow } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
@@ -85,7 +90,7 @@ function EditForm({ r, onSaved }: { r: ReleaseDetail; onSaved: () => void }) {
   );
 }
 
-function TrackEditor({ t, artist, first, last, onMove, onChanged }: { t: TrackRow; artist: string; first: boolean; last: boolean; onMove: (dir: -1 | 1) => void; onChanged: () => void }) {
+function TrackEditor({ t, releaseId, artist, first, last, onMove, onChanged, onSingle }: { t: TrackRow; releaseId: string; artist: string; first: boolean; last: boolean; onMove: (dir: -1 | 1) => void; onChanged: () => void; onSingle?: () => void }) {
   const toast = useToast();
   const [title, setTitle] = useState(t.title);
   const [explicit, setExplicit] = useState(t.explicit);
@@ -93,66 +98,66 @@ function TrackEditor({ t, artist, first, last, onMove, onChanged }: { t: TrackRo
   const [del, setDel] = useState(false);
   const dirty = title.trim() !== t.title || explicit !== t.explicit;
   return (
-    <tr>
-      <Td className="w-10 tabular-nums text-muted">{t.trackNumber ?? ""}</Td>
-      <Td className="w-10">
-        <PlayButton track={{ id: t.id, title: t.title, artist }} disabled={t.visibility !== "public"} />
-      </Td>
-      <Td>
-        <Input aria-label={`Title of track ${t.trackNumber ?? ""}`} value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
-      </Td>
-      <Td className="whitespace-nowrap tabular-nums text-muted">{fmtDuration(t.durationMs)}</Td>
-      <Td>
-        <label className="flex items-center gap-1.5 text-sm">
-          <input type="checkbox" className="accent-primary" checked={explicit} onChange={(e) => setExplicit(e.target.checked)} /> Explicit
-        </label>
-      </Td>
-      <Td>
-        <div className="flex items-center justify-end gap-1">
-          <IconButton small label={`Move ${t.title} up`} disabled={first} onClick={() => onMove(-1)}>
-            <IArrowUp size={14} />
-          </IconButton>
-          <IconButton small label={`Move ${t.title} down`} disabled={last} onClick={() => onMove(1)}>
-            <IArrowDown size={14} />
-          </IconButton>
-          <Button
-            small
-            variant="primary"
-            disabled={!dirty || busy || title.trim().length < 1}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await api(`/tracks/${t.id}`, { method: "PATCH", body: { title: title.trim(), explicit } });
-                toast("Track saved");
-                onChanged();
-              } catch (err) {
-                toast(err instanceof ApiError ? err.message : "Could not save.", "error");
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            Save
-          </Button>
-          <IconButton small label={`Delete ${t.title}`} onClick={() => setDel(true)} className="text-danger-ink hover:bg-danger/10">
-            <ITrash size={14} />
-          </IconButton>
-        </div>
-        <ReasonDialog
-          open={del}
-          title={`Delete track "${t.title}"?`}
-          description="The track and its audio file are removed permanently, and it disappears from playlists and libraries."
-          confirmLabel="Delete track"
-          danger
-          onClose={() => setDel(false)}
-          onSubmit={async (reason) => {
-            await api(`/tracks/${t.id}`, { method: "DELETE", body: { reason } });
-            toast("Track deleted");
-            onChanged();
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5">
+      <span className="w-5 shrink-0 text-sm tabular-nums text-muted">{t.trackNumber ?? ""}</span>
+      <PlayButton track={{ id: t.id, title: t.title, artist }} disabled={t.visibility !== "public"} />
+      <Input className="min-w-40 flex-1 basis-48" aria-label={`Title of track ${t.trackNumber ?? ""}`} value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+      <span className="whitespace-nowrap text-sm tabular-nums text-muted">{fmtDuration(t.durationMs)}</span>
+      <label className="flex items-center gap-1.5 text-sm">
+        <input type="checkbox" className="accent-primary" checked={explicit} onChange={(e) => setExplicit(e.target.checked)} /> Explicit
+      </label>
+      <div className="ml-auto flex items-center gap-1">
+        <IconButton small label={`Move ${t.title} up`} disabled={first} onClick={() => onMove(-1)}>
+          <IArrowUp size={14} />
+        </IconButton>
+        <IconButton small label={`Move ${t.title} down`} disabled={last} onClick={() => onMove(1)}>
+          <IArrowDown size={14} />
+        </IconButton>
+        <Button
+          small
+          variant="primary"
+          disabled={!dirty || busy || title.trim().length < 1}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await api(`/tracks/${t.id}`, { method: "PATCH", body: { title: title.trim(), explicit } });
+              toast("Track saved");
+              onChanged();
+            } catch (err) {
+              toast(err instanceof ApiError ? err.message : "Could not save.", "error");
+            } finally {
+              setBusy(false);
+            }
           }}
-        />
-      </Td>
-    </tr>
+        >
+          Save
+        </Button>
+        <Link href={`/releases/${releaseId}/tracks/${t.id}/lyrics`} aria-label={`Lyrics of ${t.title}${t.hasLyrics ? " (added)" : ""}`}>
+          <Button small>{t.hasLyrics ? "Lyrics ✓" : "Lyrics"}</Button>
+        </Link>
+        {onSingle && (
+          <Button small onClick={onSingle} aria-label={`Make ${t.title} a single`}>
+            Make single
+          </Button>
+        )}
+        <IconButton small label={`Delete ${t.title}`} onClick={() => setDel(true)} className="text-danger-ink hover:bg-danger/10">
+          <ITrash size={14} />
+        </IconButton>
+      </div>
+      <ReasonDialog
+        open={del}
+        title={`Delete track "${t.title}"?`}
+        description="The track and its audio file are removed permanently, and it disappears from playlists and libraries."
+        confirmLabel="Delete track"
+        danger
+        onClose={() => setDel(false)}
+        onSubmit={async (reason) => {
+          await api(`/tracks/${t.id}`, { method: "DELETE", body: { reason } });
+          toast("Track deleted");
+          onChanged();
+        }}
+      />
+    </li>
   );
 }
 
@@ -232,8 +237,11 @@ export default function ReleasePage() {
   const router = useRouter();
   const toast = useToast();
   const q = useApi<ReleaseDetail>(`/releases/${id}`);
+  const genreList = useApi<GenreList>("/api/genres");
   const [dlg, setDlg] = useState<"takedown" | "restore" | "delete" | "publish" | "unpublish" | null>(null);
   const [moving, setMoving] = useState(false);
+  const [single, setSingle] = useState<TrackRow | null>(null);
+  const [guestChanges, setGuestChanges] = useState(0);
   const r = q.data;
   usePageTitle(r?.title, "release");
   if (q.error) return <ErrorBox error={q.error} onRetry={q.reload} />;
@@ -287,6 +295,22 @@ export default function ReleasePage() {
                 Restore
               </Button>
             )}
+            {(canFeature(r) || r.featured) && (
+              <Button
+                aria-pressed={!!r.featured}
+                onClick={async () => {
+                  try {
+                    await api(`/releases/${r.id}/featured`, { method: r.featured ? "DELETE" : "PUT" });
+                    toast(r.featured ? "Removed from featured" : "Featured");
+                  } catch (e) {
+                    toast(e instanceof ApiError ? featureError(e.code, e.message) : "Could not save.", "error");
+                  }
+                  q.reload();
+                }}
+              >
+                <IStar size={14} fill={r.featured ? "currentColor" : "none"} /> {r.featured ? "Unfeature" : "Feature"}
+              </Button>
+            )}
             <Menu
               items={[
                 ...(!r.takenDown ? [{ label: "Take down", icon: <IBan />, danger: true, onSelect: () => setDlg("takedown") }] : []),
@@ -315,58 +339,57 @@ export default function ReleasePage() {
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[1fr_20rem]">
-        <div className="space-y-4">
-          <Card title="Details">
-            <EditForm key={`${r.title}|${r.description}|${r.genre}|${r.type}|${r.releaseDate ?? ""}`} r={r} onSaved={q.reload} />
-          </Card>
-          <Card title={`Tracks (${tracks.length})`} className={moving ? "opacity-70" : undefined}>
-            {tracks.length === 0 ? (
-              <p className="text-sm text-muted">No tracks yet. Add the audio below.</p>
-            ) : (
-              <Table>
-                <thead>
-                  <tr>
-                    <Th>#</Th>
-                    <Th />
-                    <Th>Title</Th>
-                    <Th>Length</Th>
-                    <Th>Flags</Th>
-                    <Th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {tracks.map((t, i) => (
-                    <TrackEditor key={`${t.id}|${t.title}|${t.explicit}|${t.trackNumber}`} t={t} artist={r.artistName} first={i === 0} last={i === tracks.length - 1} onMove={(d) => void move(i, d)} onChanged={q.reload} />
-                  ))}
-                </tbody>
-              </Table>
-            )}
-          </Card>
-          {!r.takenDown && (
-            <Card title="Add tracks">
-              <TrackUploader releaseId={r.id} nextTrackNumber={tracks.length + 1} genre={r.genre || undefined} pending={r.uploads ?? []} onChanged={q.reload} />
-            </Card>
-          )}
-        </div>
-        <div className="space-y-4">
-          <Card title="Cover art">
+      <div className="space-y-4">
+        <Card title="Cover art and facts">
+          <div className="grid gap-5 md:grid-cols-2">
             <CoverUpload target={`/releases/${r.id}`} coverUrl={r.coverUrl} label="Cover" onChanged={q.reload} />
+            <div className="border-t border-line pt-4 md:border-l md:border-t-0 md:pl-5 md:pt-0">
+              <KV
+                items={[
+                  ["Created", fmtDate(r.createdAt)],
+                  ["Release date", fmtDate(r.releaseDate)],
+                  ["Published", fmtDate(r.publishedAt)],
+                  ["Tracks", tracks.length],
+                  ["Release id", <code key="i" className="break-all text-xs">{r.id}</code>],
+                ]}
+              />
+            </div>
+          </div>
+        </Card>
+        <Card title="Details">
+          <EditForm key={`${r.title}|${r.description}|${r.genre}|${r.type}|${r.releaseDate ?? ""}`} r={r} onSaved={q.reload} />
+        </Card>
+        <Card title={`Tracks (${tracks.length})`} className={moving ? "opacity-70" : undefined}>
+          {tracks.length === 0 ? (
+            <p className="text-sm text-muted">No tracks yet. Add the audio below.</p>
+          ) : (
+            <ul className="divide-y divide-line">
+              {tracks.map((t, i) => (
+                <TrackEditor key={`${t.id}|${t.title}|${t.explicit}|${t.trackNumber}`} t={t} releaseId={r.id} artist={r.artistName} first={i === 0} last={i === tracks.length - 1} onMove={(d) => void move(i, d)} onChanged={q.reload} onSingle={r.type === "album" && !r.takenDown && !r.artist?.banned ? () => setSingle(t) : undefined} />
+              ))}
+            </ul>
+          )}
+        </Card>
+        <FeaturedArtistsCard key={tracks.map((t) => `${t.id}:${t.trackNumber}:${t.title}`).join("|")} releaseId={r.id} mainArtistId={r.artistId} onChanged={() => setGuestChanges((n) => n + 1)} />
+        <TrackMetadataCard releaseId={r.id} trackKey={`${guestChanges}|${tracks.map((t) => `${t.id}:${t.trackNumber}:${t.title}`).join("|")}`} />
+        {!r.takenDown && (
+          <Card title="Add tracks">
+            {r.genre && !usableGenre(r.genre, genreList.data?.genres) && <p className="mb-3 text-sm text-muted">The genre {r.genre} is switched off, so songs added now get no genre. Choose another under Details to give them one.</p>}
+            <TrackUploader releaseId={r.id} nextTrackNumber={tracks.length + 1} genre={usableGenre(r.genre, genreList.data?.genres) || undefined} pending={r.uploads ?? []} onChanged={q.reload} />
           </Card>
-          <Card title="Facts">
-            <KV
-              items={[
-                ["Created", fmtDate(r.createdAt)],
-                ["Release date", fmtDate(r.releaseDate)],
-                ["Published", fmtDate(r.publishedAt)],
-                ["Tracks", tracks.length],
-                ["Release id", <code key="i" className="break-all text-xs">{r.id}</code>],
-              ]}
-            />
-          </Card>
-        </div>
+        )}
       </div>
 
+      <MakeSingleDialog
+        track={single}
+        from={r}
+        onClose={() => setSingle(null)}
+        onDone={(releaseId) => {
+          setSingle(null);
+          toast("Single created");
+          router.push(`/releases/${releaseId}`);
+        }}
+      />
       <PublishDialog open={dlg === "publish"} r={r} onClose={() => setDlg(null)} onDone={q.reload} />
       <ReasonDialog
         open={dlg === "unpublish"}

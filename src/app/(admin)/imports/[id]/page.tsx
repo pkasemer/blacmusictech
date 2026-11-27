@@ -5,15 +5,26 @@ import { useParams } from "next/navigation";
 import { useState } from "react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { IAlert, IRefresh } from "@/components/icons";
-import { JobStatusBadge, TrackStatusBadge } from "@/components/import-parts";
+import { Chips, JobStatusBadge, TrackStatusBadge } from "@/components/import-parts";
 import { usePageTitle } from "@/components/page-meta";
 import { useToast } from "@/components/Shell";
 import { Badge, Button, Card, ErrorBox, KV, Loading, PageHeader, Progress, Table, Td, Th, Tile } from "@/components/ui";
 import { api, qs } from "@/lib/api";
 import { actionLabel, fmtBytes, fmtDateTime, fmtNum } from "@/lib/format";
+import { orderTracks, type TrackFilter } from "@/lib/importQueue";
 import { isLive, progressOf, type ImportJob } from "@/lib/imports";
 import type { AuditList } from "@/lib/types";
 import { useApi, usePoll } from "@/lib/useApi";
+
+const PAGE = 25;
+const TRACK_FILTERS: { value: TrackFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "processing", label: "Importing now" },
+  { value: "waiting", label: "Waiting" },
+  { value: "failed", label: "Failed" },
+  { value: "created", label: "Added" },
+  { value: "skippedDuplicate", label: "Already there" },
+];
 
 /** Who started the run and what they stated about the rights: kept in the audit log, shown here. */
 function History({ jobId }: { jobId: string }) {
@@ -50,6 +61,8 @@ export default function ImportPage() {
   const toast = useToast();
   const q = useApi<ImportJob>(`/imports/${id}`);
   const [cancelling, setCancelling] = useState(false);
+  const [filter, setFilter] = useState<TrackFilter>("all");
+  const [shown, setShown] = useState(PAGE);
   const j = q.data;
   usePageTitle(j ? `Import: ${j.artist}` : undefined, "import");
   usePoll(!!j && isLive(j.status), q.reload);
@@ -59,6 +72,11 @@ export default function ImportPage() {
 
   const errors = j.errors ?? [];
   const results = j.results ?? [];
+  const ordered = orderTracks(results);
+  const now = ordered.filter((r) => r.status === "processing");
+  const next = ordered.filter((r) => r.status === "waiting");
+  const visible = filter === "all" ? ordered : ordered.filter((r) => r.status === filter);
+  const countOf = (s: TrackFilter) => (s === "all" ? results.length : results.filter((r) => r.status === s).length);
   const drafts = j.visibility === "draft" || (j.type === "album" && j.failed > 0);
 
   return (
@@ -94,9 +112,35 @@ export default function ImportPage() {
       <div className="mb-4 rounded-card border border-line bg-panel p-4">
         <div className="mb-2 flex items-center justify-between text-sm">
           <span className="font-medium">{Math.round(progressOf(j) * 100)}% finished</span>
-          {isLive(j.status) && <span className="text-xs text-muted">{j.status === "pending" ? "Waiting for the script to upload the files" : "Refreshing every 15 seconds"}</span>}
+          {isLive(j.status) && <span className="text-xs text-muted">Refreshing every 15 seconds</span>}
         </div>
         <Progress value={progressOf(j) * 100} label="Import progress" tone={j.status === "failed" ? "red" : j.failed > 0 ? "amber" : j.status === "completed" ? "green" : "blue"} />
+        {isLive(j.status) && (
+          <dl className="mt-3 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[7rem_1fr]">
+            <dt className="text-muted">Right now</dt>
+            <dd role="status" className="font-medium">
+              {j.status === "pending"
+                ? "Not started, so not in the queue. The script may still be sending files, or the server may have refused to start it, for example because disk space is short."
+                : now.length > 0
+                  ? `Importing ${now.map((r) => r.title).join(" and ")}`
+                  : "Waiting its turn: earlier imports go first."}
+            </dd>
+            {j.status === "processing" && next.length > 0 && (
+              <>
+                <dt className="text-muted">Next from this import</dt>
+                <dd className="min-w-0">
+                  {next.slice(0, 3).map((r) => r.title).join(", ")}
+                  {next.length > 3 && <span className="text-muted"> and {next.length - 3} more</span>}
+                </dd>
+              </>
+            )}
+          </dl>
+        )}
+        {j.status === "processing" && (
+          <Link href="/imports" className="mt-2 inline-block text-xs text-primary hover:underline">
+            See the whole queue
+          </Link>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
@@ -152,6 +196,16 @@ export default function ImportPage() {
           {results.length === 0 ? (
             <p className="text-sm text-muted">No tracks to show.</p>
           ) : (
+            <>
+            <div className="mb-3">
+              <Chips
+                label="Filter tracks"
+                value={filter}
+                onChange={(f) => (setFilter(f), setShown(PAGE))}
+                options={TRACK_FILTERS.filter((f) => f.value === "all" || f.value === filter || countOf(f.value) > 0).map((f) => ({ ...f, count: countOf(f.value) }))}
+              />
+            </div>
+            {visible.length === 0 && <p className="text-sm text-muted">No tracks in this state now.</p>}
             <Table>
               <thead>
                 <tr>
@@ -163,9 +217,9 @@ export default function ImportPage() {
                 </tr>
               </thead>
               <tbody>
-                {results.map((r, i) => (
-                  <tr key={`${r.title}-${i}`}>
-                    <Td className="w-8 tabular-nums text-muted">{i + 1}</Td>
+                {visible.slice(0, shown).map((r) => (
+                  <tr key={r.number}>
+                    <Td className="w-8 tabular-nums text-muted">{r.number}</Td>
                     <Td>
                       <div className="font-medium">{r.title}</div>
                       {r.note && <div className="text-[11px] text-muted">{r.note}</div>}
@@ -185,6 +239,15 @@ export default function ImportPage() {
                 ))}
               </tbody>
             </Table>
+            {visible.length > shown && (
+              <div className="mt-3">
+                <Button small onClick={() => setShown((n) => n + PAGE)}>
+                  Show more ({visible.length - shown} left)
+                </Button>
+              </div>
+            )}
+            {filter === "all" && isLive(j.status) && <p className="mt-2 text-xs text-muted">Sorted: importing now, then waiting in the order they will run, then finished. The number is the place in the script&rsquo;s list.</p>}
+            </>
           )}
           {drafts && j.created > 0 && <p className="mt-3 text-xs text-muted">Saved as drafts: open each release to check it and publish it.</p>}
         </Card>

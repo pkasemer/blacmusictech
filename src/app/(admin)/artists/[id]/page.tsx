@@ -7,7 +7,7 @@ import { VerificationBadge } from "@/components/badges";
 import { usePageTitle } from "@/components/page-meta";
 import { DeleteDialog, ReasonDialog } from "@/components/Dialogs";
 import { useToast } from "@/components/Shell";
-import { Badge, Button, Card, ErrorBox, Field, Input, KV, Loading, PageHeader, Select, Table, Td, Textarea, Th } from "@/components/ui";
+import { Avatar, Badge, Button, Card, ErrorBox, Field, Input, KV, Loading, PageHeader, Select, Table, Td, Textarea, Th } from "@/components/ui";
 import { api, ApiError, qs } from "@/lib/api";
 import { fmtBytes, fmtDate, fmtDateTime, fmtNum } from "@/lib/format";
 import type { ArtistDeletionPreview, ArtistDetail, ReleaseList } from "@/lib/types";
@@ -15,8 +15,15 @@ import { grantDecision, verificationError, type Decision } from "@/lib/verificat
 import { IAlert, IShield } from "@/components/icons";
 import { useApi } from "@/lib/useApi";
 import { VisibilityBadge } from "@/components/badges";
+import { BulkPublishDialog, SelectBox, SelectionBar, useSelection } from "@/components/BulkPublish";
+import { CoverUpload } from "@/components/CoverUpload";
+import { CombineDialog } from "@/components/CombineReleases";
+import { combinable } from "@/lib/combine";
+import { StorageCard } from "@/components/StorageCard";
+import { RemoveOwnerDialog, TransferDialog } from "@/components/Ownership";
+import { whyNotSelectable } from "@/lib/bulk";
 
-type Dlg = "ban" | "unban" | "delete" | "verify" | "reject" | "revoke" | null;
+type Dlg = "ban" | "unban" | "delete" | "verify" | "reject" | "revoke" | "transfer" | "removeOwner" | null;
 
 function EditForm({ a, onSaved }: { a: ArtistDetail; onSaved: () => void }) {
   const toast = useToast();
@@ -111,8 +118,11 @@ export default function ArtistPage() {
   const router = useRouter();
   const toast = useToast();
   const q = useApi<ArtistDetail>(`/artists/${id}`);
-  const releases = useApi<ReleaseList>(`/releases${qs({ artistId: id, limit: 50 })}`);
+  const releases = useApi<ReleaseList>(`/releases${qs({ artistId: id, limit: 100 })}`);
   const [dlg, setDlg] = useState<Dlg>(null);
+  const selection = useSelection();
+  const [publishing, setPublishing] = useState(false);
+  const [combining, setCombining] = useState(false);
   const a = q.data;
   usePageTitle(a?.name, "artist");
 
@@ -122,6 +132,9 @@ export default function ArtistPage() {
   const v = a.verification;
   const grant = grantDecision(v.state); // null once verified
   const artistId = a.id;
+  // nothing of a banned artist can be published
+  const pickable = banned ? [] : (releases.data?.releases ?? []).filter((r) => !whyNotSelectable(r));
+  const pickedAll = pickable.length > 0 && pickable.every((r) => selection.has(r.id));
 
   async function decide(decision: Decision, note: string, done: string) {
     try {
@@ -133,8 +146,6 @@ export default function ArtistPage() {
     toast(done);
     q.reload();
   }
-
-  const used = a.storage.quotaBytes > 0 ? Math.min(100, (a.storage.usedBytes / a.storage.quotaBytes) * 100) : 0;
 
   return (
     <>
@@ -175,6 +186,31 @@ export default function ArtistPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Profile">
+          <div className="mb-5 border-b border-line pb-5">
+            {a.owner ? (
+              <div className="flex flex-wrap items-center gap-4">
+                {a.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- the image comes from the API's own media host
+                  <img src={a.imageUrl} alt={`${a.name}`} className="size-24 rounded-full border border-line object-cover" />
+                ) : (
+                  <Avatar name={a.name} size={96} />
+                )}
+                <p className="min-w-0 flex-1 basis-40 text-sm text-muted">This artist has an account, so the picture is that person&rsquo;s profile picture. Only they can change it, in the app.</p>
+              </div>
+            ) : (
+              <CoverUpload
+                key={a.imageUrl ?? "none"}
+                target={`/artists/${a.id}`}
+                field="imageId"
+                purpose="avatar"
+                label="Picture"
+                round
+                coverUrl={a.imageUrl}
+                hint="This is the cover on the artist’s profile in the app. A square picture works best (JPEG, PNG or WebP, up to 10 MB)."
+                onChanged={q.reload}
+              />
+            )}
+          </div>
           <EditForm key={`${a.name}|${a.bio}`} a={a} onSaved={q.reload} />
         </Card>
 
@@ -219,36 +255,37 @@ export default function ArtistPage() {
                 ["Created", fmtDate(a.createdAt)],
               ]}
             />
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              {a.owner ? (
+                <Button variant="danger" onClick={() => setDlg("removeOwner")}>
+                  Remove from user
+                </Button>
+              ) : (
+                <Button disabled={banned} onClick={() => setDlg("transfer")}>
+                  Transfer to a user
+                </Button>
+              )}
+            </div>
+            <p className="mt-2 text-[11px] text-muted">
+              {a.owner ? "This person manages the artist in the app." : banned ? "A banned artist cannot be transferred." : "When the artist signs up in the app, give them this profile."}
+            </p>
           </Card>
         </div>
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card title="Storage">
-          <div className="mb-1 flex justify-between text-sm">
-            <span>
-              {fmtBytes(a.storage.usedBytes)} of {fmtBytes(a.storage.quotaBytes)}
-            </span>
-            <span className="text-muted">{Math.round(used)}%</span>
-          </div>
-          <div className="mb-4 h-2 rounded bg-canvas" role="progressbar" aria-valuenow={Math.round(used)} aria-valuemin={0} aria-valuemax={100} aria-label="Storage used">
-            <div className="h-2 rounded bg-brand" style={{ width: `${used}%` }} />
-          </div>
-          <GrantForm a={a} onDone={q.reload} />
-          {a.recentGrants.length > 0 && (
-            <ul className="mt-4 space-y-1 border-t border-line pt-3 text-sm">
-              {a.recentGrants.slice(0, 6).map((g) => (
-                <li key={g.id} className="flex justify-between gap-2">
-                  <span className="truncate text-muted">
-                    {g.kind}: {g.note || "–"}
-                  </span>
-                  <span className="tabular-nums">{g.bytes > 0 ? "+" : ""}{fmtBytes(g.bytes)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-        <Card title="Releases">
+        <StorageCard a={a} grantForm={<GrantForm a={a} onDone={q.reload} />} />
+        <Card
+          title="Releases"
+          className="lg:order-first lg:col-span-2"
+          actions={
+            !banned && (releases.data?.releases.filter(combinable).length ?? 0) >= 2 ? (
+              <Button small onClick={() => setCombining(true)}>
+                Make album or EP
+              </Button>
+            ) : undefined
+          }
+        >
           {releases.error ? (
             <ErrorBox error={releases.error} onRetry={releases.reload} />
           ) : !releases.data ? (
@@ -256,9 +293,20 @@ export default function ArtistPage() {
           ) : releases.data.releases.length === 0 ? (
             <p className="text-sm text-muted">No releases.</p>
           ) : (
+            <>
+            <SelectionBar count={selection.items.length} hidden={selection.items.filter((s) => !releases.data!.releases.some((r) => r.id === s.id)).length} onPublish={() => setPublishing(true)} onClear={selection.clear} />
             <Table>
               <thead>
                 <tr>
+                  <Th className="w-10">
+                    <SelectBox
+                      label={pickable.length === 0 ? "Nothing here can be published" : "Select every release that can be published"}
+                      disabled={pickable.length === 0}
+                      checked={pickedAll}
+                      mixed={selection.items.length > 0}
+                      onChange={(on) => selection.set(pickable, on)}
+                    />
+                  </Th>
                   <Th>Title</Th>
                   <Th>State</Th>
                 </tr>
@@ -266,6 +314,14 @@ export default function ArtistPage() {
               <tbody>
                 {releases.data.releases.map((r) => (
                   <tr key={r.id}>
+                    <Td>
+                      <SelectBox
+                        label={banned ? "This artist is banned" : (whyNotSelectable(r) ?? `Select ${r.title}`)}
+                        disabled={banned || !!whyNotSelectable(r)}
+                        checked={selection.has(r.id)}
+                        onChange={(on) => selection.set([r], on)}
+                      />
+                    </Td>
                     <Td>
                       <Link href={`/releases/${r.id}`} className="font-medium hover:underline">
                         {r.title}
@@ -281,10 +337,49 @@ export default function ArtistPage() {
                 ))}
               </tbody>
             </Table>
+            </>
           )}
         </Card>
       </div>
 
+      <TransferDialog
+        open={dlg === "transfer"}
+        a={a}
+        onClose={() => setDlg(null)}
+        onDone={(email) => {
+          toast(`Artist transferred to ${email}`);
+          q.reload();
+        }}
+      />
+      <RemoveOwnerDialog
+        open={dlg === "removeOwner"}
+        a={a}
+        onClose={() => setDlg(null)}
+        onDone={() => {
+          toast("Artist removed from the user");
+          q.reload();
+        }}
+      />
+      <CombineDialog
+        open={combining}
+        artistName={a.name}
+        releases={releases.data?.releases ?? []}
+        onClose={() => setCombining(false)}
+        onDone={(releaseId) => {
+          toast("Releases combined");
+          router.push(`/releases/${releaseId}`);
+        }}
+      />
+      <BulkPublishDialog
+        open={publishing}
+        items={selection.items}
+        onClose={() => setPublishing(false)}
+        onFinished={(ids) => {
+          selection.remove(ids);
+          releases.reload();
+          q.reload();
+        }}
+      />
       <ReasonDialog
         open={dlg === "ban"}
         title={`Ban ${a.name}?`}

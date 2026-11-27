@@ -26,6 +26,8 @@ export interface UserList extends Paged {
   users: UserRow[];
 }
 export interface UserDetail extends UserRow {
+  /** What this account does is left out of what other listeners are offered. Absent on a server without it. */
+  signalsExcluded?: boolean;
   ban: BanInfo | null;
   signIn: { password: boolean; apple: boolean; google: boolean };
   artist: { id: string; name: string } | null;
@@ -34,7 +36,8 @@ export interface UserDetail extends UserRow {
   pushEnabled: boolean;
 }
 export interface UserDeletionPreview {
-  artist: { id: string; name: string } | null;
+  /** returnsToCatalog: an artist this user was given; it survives the deletion */
+  artist: { id: string; name: string; returnsToCatalog?: boolean } | null;
   releases: number;
   tracks: number;
   playlists: number;
@@ -85,7 +88,7 @@ export interface ArtistDetail {
   flagged: boolean;
   ban: BanInfo | null;
   owner: { id: string; email: string; displayName: string } | null;
-  storage: { usedBytes: number; quotaBytes: number };
+  storage: ArtistStorage;
   counts: { releases: number; publicReleases: number; tracks: number; followers: number; plays: number };
   recentGrants: StorageGrant[];
   createdAt: string;
@@ -104,6 +107,11 @@ export type Visibility = "draft" | "scheduled" | "public";
 
 export interface ReleaseRow {
   id: string;
+  releaseDate?: string | null;
+  /** how far the tracks' metadata has come; absent on an older server */
+  metadata?: { total: number; enriched: number; pendingReview: number; verified: number; status: "not_started" | "in_progress" | "completed" };
+  /** shown under Featured releases in the app; absent on an older server */
+  featured?: boolean;
   title: string;
   type: "single" | "album";
   /** single | ep | album (an album of 1-6 tracks is an EP) */
@@ -129,6 +137,8 @@ export interface TrackRow {
   durationMs: number;
   visibility: "draft" | "public";
   explicit: boolean;
+  /** absent on an older server */
+  hasLyrics?: boolean;
   genre: string;
 }
 export interface ReleaseDetail extends ReleaseRow {
@@ -222,6 +232,8 @@ export interface SearchTrack {
 export interface Overview {
   users: { total: number; verifiedEmail: number; banned: number; new7d: number; new30d: number };
   artists: { total: number; verified: number; pendingVerification: number; banned: number };
+  /** absent on an older server */
+  reviews?: { pending: number };
   releases: { total: number; public: number; draft: number; scheduled: number; takenDown: number };
   tracks: { total: number };
   shows: { total: number };
@@ -343,7 +355,8 @@ export interface ServerInfo {
   };
   topArtists: { artistId: string; name: string; tracks: number; bytes: number }[];
   work: {
-    uploads: { pending: number; queued: number; processing: number; failedLast24h: number; oldestQueuedSeconds: number };
+    /** stuck: of those processing, the ones no worker is on any more (absent on an older server) */
+    uploads: { pending: number; queued: number; processing: number; stuck?: number; failedLast24h: number; oldestQueuedSeconds: number };
     imports: { awaitingFiles: number; processing: number };
     emails: { waiting: number; failedLast24h: number };
     push: { waiting: number; failedLast24h: number };
@@ -363,4 +376,25 @@ export interface ServerHistory {
   hours: number;
   stepSeconds: number;
   points: ServerHistoryPoint[];
+}
+
+export interface ArtistStorage {
+  /** original song uploads, drafts included; this is what counts against the allowance */
+  usedBytes: number;
+  /** 0 for a catalog artist, who has no allowance and no limit */
+  quotaBytes: number;
+  /** uploads by the Blac Music team, which do not count against the allowance */
+  teamUploadBytes?: number;
+  /** everything stored for the artist; absent on an older server */
+  breakdown?: {
+    publishedAudio: StorageFiles;
+    unpublishedAudio: StorageFiles;
+    unfinishedUploads: StorageFiles;
+    playbackAudio: StorageFiles;
+    pictures: StorageFiles;
+  };
+}
+export interface StorageFiles {
+  files: number;
+  bytes: number;
 }

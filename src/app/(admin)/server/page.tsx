@@ -184,12 +184,22 @@ function Work({ info }: { info: ServerInfo }) {
     </div>
   );
   return (
-    <Card title="Waiting work" actions={alertLevel(info.alerts, "queue_slow", "worker_silent") && <LevelBadge level={alertLevel(info.alerts, "queue_slow", "worker_silent")!} />}>
+    <Card title="Waiting work" actions={alertLevel(info.alerts, "queue_slow", "worker_silent", "upload_stuck") && <LevelBadge level={alertLevel(info.alerts, "queue_slow", "worker_silent", "upload_stuck")!} />}>
       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
         {group("Audio uploads", [
           ["Still uploading", fmtNum(w.uploads.pending)],
           ["Queued", fmtNum(w.uploads.queued)],
           ["Processing", fmtNum(w.uploads.processing)],
+          ...(w.uploads.stuck === undefined
+            ? []
+            : ([
+                [
+                  "Stuck",
+                  <Link key="s" href="/processing" className={cx("hover:underline", w.uploads.stuck > 0 ? "font-medium text-warning-ink" : "text-primary")}>
+                    {fmtNum(w.uploads.stuck)}
+                  </Link>,
+                ],
+              ] as [string, ReactNode][])),
           ["Longest wait", w.uploads.oldestQueuedSeconds > 0 ? fmtSpan(w.uploads.oldestQueuedSeconds) : "–"],
           ["Failed, 24 h", failed(w.uploads.failedLast24h)],
         ])}
@@ -344,6 +354,11 @@ export default function ServerPage() {
                 <li key={a.code} className={cx("flex items-center gap-3 rounded-control border px-3 py-2 text-sm", a.level === "critical" ? "border-danger/30 bg-danger/5" : "border-warning/40 bg-warning/5")}>
                   <LevelBadge level={a.level === "critical" ? "critical" : "warning"} />
                   <span>{a.message}</span>
+                  {a.code === "upload_stuck" && (
+                    <Link href="/processing" className="ml-auto shrink-0 font-medium text-primary hover:underline">
+                      See stuck songs
+                    </Link>
+                  )}
                 </li>
               ))}
             </ul>

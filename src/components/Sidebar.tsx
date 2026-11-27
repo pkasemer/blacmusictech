@@ -1,11 +1,14 @@
 "use client";
 
+import { confirmLeave } from "@/lib/unsaved";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { favorites, recents, type SavedItem } from "@/lib/listStore";
-import { IServer, IImport, IKey, IDashboard, IDisc, IKeyboard, ILayers, ILogOut, IMic, IMore, IPlaylist, IPlus, IScroll, ISearch, IShield, IStar, ITrend, IUsers, IClock } from "./icons";
+import { REVIEWS_CHANGED, type ReviewList } from "@/lib/reviews";
+import { useApi, usePoll } from "@/lib/useApi";
+import { ICheck, IFolder, IActivity, IServer, IImport, IKey, IDashboard, IDisc, IKeyboard, ILayers, ILogOut, IMic, IMore, IPlaylist, IPlus, IScroll, ISearch, IShield, IStar, ITrend, IUsers, IClock } from "./icons";
 import { Menu } from "./menu";
 import { Avatar, Kbd, cx } from "./ui";
 
@@ -19,6 +22,7 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
     title: "Workspace",
     items: [
       { href: "/", label: "Dashboard", icon: <IDashboard /> },
+      { href: "/reviews", label: "Reviews", icon: <ICheck /> },
       { href: "/verifications", label: "Verifications", icon: <IShield /> },
     ],
   },
@@ -27,7 +31,10 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { href: "/playlists", label: "Playlists", icon: <IPlaylist /> },
       { href: "/sections", label: "Sections", icon: <ILayers /> },
+      { href: "/featured", label: "Featured releases", icon: <IStar /> },
       { href: "/releases", label: "Releases", icon: <IDisc /> },
+      { href: "/metadata", label: "Metadata review", icon: <ICheck /> },
+      { href: "/taxonomy", label: "Metadata lists", icon: <IFolder /> },
       { href: "/artists", label: "Artists", icon: <IMic /> },
     ],
   },
@@ -42,19 +49,23 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
     title: "People and insight",
     items: [
       { href: "/users", label: "Users", icon: <IUsers /> },
+      { href: "/recommendations", label: "Recommendations", icon: <IStar /> },
       { href: "/search-insights", label: "Search insights", icon: <ITrend /> },
       { href: "/audit-log", label: "Audit log", icon: <IScroll /> },
     ],
   },
   {
     title: "System",
-    items: [{ href: "/server", label: "Server", icon: <IServer /> }],
+    items: [
+      { href: "/processing", label: "Song processing", icon: <IActivity /> },
+      { href: "/server", label: "Server", icon: <IServer /> },
+    ],
   },
 ];
 
 const KIND_ICON: Record<string, ReactNode> = { import: <IImport />, artist: <IMic />, user: <IUsers />, release: <IDisc />, playlist: <IPlaylist />, section: <ILayers /> };
 
-function Row({ href, active, icon, children, onNavigate }: { href: string; active: boolean; icon: ReactNode; children: ReactNode; onNavigate: () => void }) {
+function Row({ href, active, icon, children, count, onNavigate }: { href: string; active: boolean; icon: ReactNode; children: ReactNode; count?: number; onNavigate: () => void }) {
   return (
     <Link
       href={href}
@@ -64,6 +75,11 @@ function Row({ href, active, icon, children, onNavigate }: { href: string; activ
     >
       <span className={active ? "text-primary" : "text-faint"}>{icon}</span>
       <span className="truncate">{children}</span>
+      {!!count && (
+        <span className="ml-auto shrink-0 rounded-full bg-warning/15 px-1.5 text-[11px] font-semibold tabular-nums text-warning-ink" aria-label={`${count} waiting`}>
+          {count}
+        </span>
+      )}
     </Link>
   );
 }
@@ -87,6 +103,16 @@ export function Sidebar({
   const router = useRouter();
   const favs = favorites.use();
   const recent = recents.use().filter((r) => !favs.some((f) => f.href === r.href)).slice(0, 5);
+  // how many releases are waiting; read again on each page change and once a minute
+  const reviews = useApi<ReviewList>("/reviews?status=pending&limit=1");
+  const again = reviews.reload;
+  useEffect(() => again(), [pathname, again]);
+  usePoll(true, again, 60_000);
+  useEffect(() => {
+    window.addEventListener(REVIEWS_CHANGED, again);
+    return () => window.removeEventListener(REVIEWS_CHANGED, again);
+  }, [again]);
+  const waiting = reviews.data?.pending ?? 0;
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`));
 
   const saved = (title: string, list: SavedItem[], icon: ReactNode) =>
@@ -119,10 +145,10 @@ export function Sidebar({
           align="left"
           fullWidth
           items={[
-            { label: "New release", icon: <IDisc />, onSelect: () => router.push("/releases/new") },
-            { label: "New artist", icon: <IMic />, onSelect: () => router.push("/artists?new=1") },
-            { label: "New playlist", icon: <IPlaylist />, onSelect: () => router.push("/playlists?new=1"), separated: true },
-            { label: "New section", icon: <ILayers />, onSelect: () => router.push("/sections?new=1") },
+            { label: "New release", icon: <IDisc />, onSelect: () => void (confirmLeave() && router.push("/releases/new")) },
+            { label: "New artist", icon: <IMic />, onSelect: () => void (confirmLeave() && router.push("/artists?new=1")) },
+            { label: "New playlist", icon: <IPlaylist />, onSelect: () => void (confirmLeave() && router.push("/playlists?new=1")), separated: true },
+            { label: "New section", icon: <ILayers />, onSelect: () => void (confirmLeave() && router.push("/sections?new=1")) },
           ]}
           trigger={({ props }) => (
             <button {...props} className="flex h-8 w-full items-center justify-center gap-1.5 rounded-control bg-primary text-sm font-medium text-white hover:bg-primary-dark">
@@ -142,7 +168,7 @@ export function Sidebar({
           <div key={g.title}>
             <div className="mb-1 px-2.5 text-[11px] font-semibold uppercase tracking-wide text-faint">{g.title}</div>
             {g.items.map((n) => (
-              <Row key={n.href} href={n.href} active={isActive(n.href)} icon={n.icon} onNavigate={onNavigate}>
+              <Row key={n.href} href={n.href} active={isActive(n.href)} icon={n.icon} count={n.href === "/reviews" ? waiting : undefined} onNavigate={onNavigate}>
                 {n.label}
               </Row>
             ))}

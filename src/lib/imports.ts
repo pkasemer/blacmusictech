@@ -81,8 +81,8 @@ export function progressOf(j: Pick<ImportJob, "totalTracks" | "created" | "skipp
 }
 
 export const JOB_LABEL: Record<JobStatus, string> = {
-  pending: "Waiting for files",
-  processing: "Processing",
+  pending: "Not started",
+  processing: "Started",
   completed: "Completed",
   completed_with_errors: "Completed with errors",
   failed: "Failed",

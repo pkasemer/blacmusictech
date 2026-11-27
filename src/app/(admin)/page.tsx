@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { BarList, LineChart } from "@/components/charts";
-import { IActivity, IArrowUp, IAlert, IBan, IClock, IDisc, IEnter, IMic, IPlaylist, IPlus, ISearch, IShield, ITrend, IUsers } from "@/components/icons";
+import { ICheck, IActivity, IArrowUp, IAlert, IBan, IClock, IDisc, IEnter, IMic, IPlaylist, IPlus, ISearch, IShield, ITrend, IUsers } from "@/components/icons";
 import { useSession } from "@/components/Shell";
 import { Avatar, Badge, Button, Card, Empty, ErrorBox, Kbd, Loading, PageHeader, Select, Tile } from "@/components/ui";
 import { qs } from "@/lib/api";
 import { actionLabel, fmtBytes, fmtDateTime, fmtNum, isoDay } from "@/lib/format";
 import { recents } from "@/lib/listStore";
+import type { ProcessingList } from "@/lib/processing";
 import type { ArtistList, AuditList, Metric, Overview, Timeseries, TopList } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
@@ -65,6 +66,8 @@ export default function Dashboard() {
   const activity = useApi<AuditList>(`/audit-log${qs({ limit: 7 })}`);
   const topArtists = useApi<TopList>(`/stats/top${qs({ kind: "artists", range: "30d", limit: 6 })}`);
   const topTracks = useApi<TopList>(`/stats/top${qs({ kind: "tracks", range: "30d", limit: 6 })}`);
+  const processing = useApi<ProcessingList>("/processing");
+  const stuck = processing.data?.counts.stuck ?? 0;
   const recent = recents.use();
   const o = overview.data;
   const first = session?.user.displayName.split(" ")[0] ?? "";
@@ -116,6 +119,8 @@ export default function Dashboard() {
       {o && (
         <>
           <div className="mb-4 flex flex-wrap gap-2">
+            {stuck > 0 && <Attention href="/processing" icon={<IAlert size={14} />} count={stuck} label={stuck === 1 ? "song stuck: retry it" : "songs stuck: retry them"} tone="red" />}
+            {o.reviews && <Attention href="/reviews" icon={<ICheck size={14} />} count={o.reviews.pending} label="releases and profiles waiting for review" tone="amber" />}
             <Attention href="/verifications" icon={<IShield size={14} />} count={o.artists.pendingVerification} label="verification requests waiting" tone="amber" />
             <Attention href="/users?status=banned" icon={<IBan size={14} />} count={o.users.banned} label="banned users" tone="red" />
             <Attention href="/releases?takenDown=true" icon={<IAlert size={14} />} count={o.releases.takenDown} label="releases taken down" tone="red" />

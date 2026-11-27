@@ -78,6 +78,91 @@ cannot make the server call an address of its choosing. Behind nginx the `/api/u
 (already in `deploy/nginx/blacadmin.conf`). Needs the Backend's "create artist and release" admin routes
 (`admin-create-artist-release-request.md` in the notes folder).
 
+### Publishing several at once, and artist pictures
+
+- **Bulk publish**: tick releases on the Releases page (ticks stay while you change page or filter; up to 100 rows per page) or on
+  an artist's page, then **Publish** now or schedule them all for one time. The site sends the ordinary publish request for each
+  release in turn, so every one is checked and audited separately; failures are listed with the reason and stay ticked. You can
+  stop part way, and it stops by itself if the server signs you out or limits requests.
+- **Artist picture** (the cover on their profile in the app): change or remove it on the artist's page. Only for catalog artists;
+  for an artist with an account it is that person's profile picture, which the Backend does not let an administrator replace.
+
+### Who manages an artist
+
+On an artist's page, **Transfer to a user** gives a catalog artist to the person who signed up in the app: find their account
+by email or name, and record how you checked it is them (audit log). Accounts that are banned, unverified or already have an
+artist cannot be chosen. **Remove from user** (needs a reason) puts the artist back in the catalog; releases stay as they are.
+
+Rules, enforced by the Backend: songs the team uploaded before the transfer do not count against the new owner's allowance
+(uploads made while they own it do, the team's included); the owner can edit and delete the existing songs; if their account
+is deleted the artist returns to the catalog with the team's songs. Removal drops their unsent and failed uploads and cancels
+their transfers; files already queued still become songs. Needs
+`POST` and `DELETE /v1/admin/artists/{id}/owner`; an older server makes the dialogs say so.
+
+### The artist's storage card
+
+Only artists with an account have a storage allowance (original song uploads, drafts included): they get the bar and the form
+that changes it. A catalog artist has no limit, so the card shows what is stored and no allowance. With the Backend's
+`storage.breakdown` it lists published songs, unpublished songs, unfinished uploads, playback copies and pictures; without it,
+only the uploaded songs.
+
+## Song processing: stuck songs
+
+`/processing` (sidebar "System", or `G` then `Q`) lists uploads that are stuck, being worked on, waiting, or failed in the
+last 7 days, refreshed every 10 s. A **stuck** song can be retried; one being worked on offers **Restart anyway** behind a
+confirmation; most failed songs cannot be retried because their file is gone. A refusal refreshes the list. The dashboard shows
+a notice when something is stuck, and the Server page's alert links here. Needs the Backend's `/v1/admin/processing` routes;
+until then the page says it is not available.
+
+## Track metadata (phases 1 to 4)
+
+Lists: `/taxonomy` adds and edits languages, language groups, cultures, regions, genres and one level of subgenres, and
+activates or deactivates them. Nothing is deleted: an inactive entry stays on its tracks and cannot be newly chosen. Mood,
+energy, danceability and instrumentation are fixed. Against a server without these routes the lists are read-only.
+Genre names are at most 40 characters. A switched-off genre is kept where it is already used but is not sent again
+(`usableGenre`): songs added to such a release get no genre.
+
+Bulk changes: tick tracks on a release page or in a review queue (that page of the list only), then **Add or replace
+metadata** (languages, genres, regions) or **Verify**. Only ticked categories change, and **Add** never overwrites. The Backend
+previews every track first; nothing is applied until confirmed, and a track edited in between stops the whole apply. Albums are
+never applied to their tracks automatically.
+
+Review: in the editor, **Save and submit for review**, then verify or reject chosen values (a rejection needs a reason; values
+stay recorded). `/metadata` has the review queues; the release list shows progress and filters by metadata status, tracks
+waiting for review and artist. Which fields are required, and every status, comes from the Backend.
+
+### Phase 1
+
+A release page lists its tracks' enrichment ("3 of 8 tracks enriched"); **Enrich/Edit** opens `/releases/{id}/tracks/{trackId}`:
+languages (primary/secondary, or Unknown), cultures, regions, genres (one primary), mood, energy, danceability,
+instrumentation, and each saved value's source and verification. Nothing is inferred from the artist, a region or a language
+group. Unsaved edits are guarded (tab close, links, keyboard and palette jumps; not the browser's Back button). Needs the
+Backend routes in `catalogue-metadata-spec.md`. Later phases: review/verify and release-list filters, bulk edits, taxonomy
+management. Administrators only for now.
+
+## Lyrics and translations
+
+Each track on a release has a **Lyrics** button (also on its metadata page). A lyric line starts with `[mm:ss.xx]`; the line directly under it, with no time, is its optional English translation. The page explains the format, checks it as you type (errors name the line and block saving), warns how many lines have no translation and previews the pairs. Text with no times is saved as plain lyrics. The rules in `src/lib/lyrics.ts` mirror the Backend's `internal/lyrics/lrc.go`; change both together. Needs the Backend's admin lyrics routes (migration `0041`).
+
+### Timing tool
+
+**Time with the song** on the lyrics page (`…/lyrics/sync`): paste the words, press Space as each line is sung, then add English translations line by line, now or later. Keys: Space/Enter stamp, P play/pause, arrows seek and choose a line, Backspace undo, B music break. Work that cannot be saved yet (the server only takes fully timed lyrics) is kept in the browser's local storage per song. Playing drafts needs the Backend's `GET /v1/admin/tracks/{id}/playback`; without it only public songs play. Logic: `src/lib/lyricSync.ts`.
+
+## Reviews
+
+**Reviews** (sidebar, with the number waiting; `G` then `W`) is the queue of artists' new releases and of changes to live ones, oldest first. A review shows the cover, details, every track with audio, lyrics, credits and, for changes, current and proposed values side by side. Approve, or reject with a reason the artist reads. A decision carries the revision that was on screen, so one on a withdrawn or since-changed submission is refused. New artist profiles and changes to an artist's name, picture or bio are in the same queue; a release cannot be approved before its artist's profile. Needs the Backend's review routes (migrations `0042` and `0043`).
+
+## Featured artists
+
+On a release page, **Featured artists** adds an existing Blac artist as a guest on every song or on one song, and removes them. Only features added here link to the guest's profile in the app; a name the release's own artist typed shows as text, and **Link profile** turns it into a linked one. Needs the Backend's `featured-artists` routes (migration `0040`); on an older server the card says so.
+
+## User preference graph
+
+A user's page draws their preferences as a connected graph (and as a list): sign-up choices, follows and listening from the
+last 90 days, with artist to genre links. Filled dot = chosen or followed, ring = from listening only. Languages and
+regions are only what the user chose; nothing about a person is inferred from their music. Layout rules are in
+`src/lib/preferenceGraph.ts`; data from `GET /v1/admin/users/{id}/preference-graph`.
+
 ## Bulk import: keys and runs
 
 - **API keys** (`/api-keys`): a script imports a catalogue with a key, never with your password. A key opens only the Backend's

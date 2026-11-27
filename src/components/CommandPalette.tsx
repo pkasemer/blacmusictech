@@ -1,11 +1,12 @@
 "use client";
 
+import { confirmLeave } from "@/lib/unsaved";
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, qs } from "@/lib/api";
 import { PAGES } from "@/lib/breadcrumbs";
 import type { ArtistList, PlaylistList, ReleaseList, UserList } from "@/lib/types";
-import { IServer, IImport, IKey, IAlert, IArrowDown, IArrowUp, IDashboard, IDisc, IEnter, IKeyboard, ILayers, ILogOut, IMic, IPlaylist, IPlus, IScroll, ISearch, IShield, ITrend, IUsers } from "./icons";
+import { ICheck, IStar, IActivity, IFolder, IServer, IImport, IKey, IAlert, IArrowDown, IArrowUp, IDashboard, IDisc, IEnter, IKeyboard, ILayers, ILogOut, IMic, IPlaylist, IPlus, IScroll, ISearch, IShield, ITrend, IUsers } from "./icons";
 import { Kbd } from "./ui";
 
 interface Item {
@@ -30,6 +31,11 @@ const PAGE_ICON: Record<string, ReactNode> = {
   "/imports": <IImport />,
   "/api-keys": <IKey />,
   "/server": <IServer />,
+  "/processing": <IActivity />,
+  "/taxonomy": <IFolder />,
+  "/featured": <IStar />,
+  "/metadata": <ICheck />,
+  "/reviews": <ICheck />,
 };
 
 export function CommandPalette({ open, onClose, onShortcuts, onSignOut }: { open: boolean; onClose: () => void; onShortcuts: () => void; onSignOut: () => void }) {
@@ -63,7 +69,7 @@ function Palette({ onClose, onShortcuts, onSignOut }: { onClose: () => void; onS
   const listId = useId();
   const go = (href: string) => () => {
     onClose();
-    router.push(href);
+    if (confirmLeave()) router.push(href);
   };
 
   const commands: Item[] = useMemo(

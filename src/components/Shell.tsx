@@ -1,5 +1,6 @@
 "use client";
 
+import { confirmLeave } from "@/lib/unsaved";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, setCsrf, setSignedOutHandler } from "@/lib/api";
@@ -42,9 +43,10 @@ const SHORTCUTS: [string, string][] = [
   ["G then M", "Go to Imports"],
   ["G then K", "Go to API keys"],
   ["G then H", "Go to Server"],
+  ["G then Q", "Go to Song processing"],
   ["Esc", "Close a dialog or menu"],
 ];
-const GO: Record<string, string> = { d: "/", v: "/verifications", p: "/playlists", s: "/sections", r: "/releases", a: "/artists", u: "/users", i: "/search-insights", l: "/audit-log", m: "/imports", k: "/api-keys", h: "/server" };
+const GO: Record<string, string> = { d: "/", v: "/verifications", p: "/playlists", s: "/sections", r: "/releases", a: "/artists", u: "/users", i: "/search-insights", l: "/audit-log", m: "/imports", k: "/api-keys", h: "/server", q: "/processing", t: "/taxonomy", w: "/reviews" };
 
 const typing = (el: EventTarget | null) => el instanceof HTMLElement && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
 
@@ -123,7 +125,7 @@ export function Shell({ user, csrf, environment, children }: { user: SessionInfo
         g = 0;
         if (to) {
           e.preventDefault();
-          router.push(to);
+          if (confirmLeave()) router.push(to);
         }
       }
     };

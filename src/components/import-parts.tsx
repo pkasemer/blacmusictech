@@ -1,5 +1,28 @@
 import { JOB_LABEL, type ImportTrackStatus, type JobStatus } from "@/lib/imports";
-import { Badge, type Tone } from "./ui";
+import { Badge, cx, type Tone } from "./ui";
+
+/** A row of one-of-many filter buttons with counts. */
+export function Chips<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { value: T; label: string; count: number | string }[]; onChange: (v: T) => void }) {
+  return (
+    <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          aria-pressed={value === o.value}
+          onClick={() => onChange(o.value)}
+          className={cx(
+            "inline-flex h-8 items-center gap-1.5 rounded-control border px-3 text-sm font-medium",
+            value === o.value ? "border-primary bg-primary-soft text-primary-ink" : "border-line bg-panel text-muted hover:bg-sunken hover:text-ink",
+          )}
+        >
+          {o.label}
+          <span className="tabular-nums text-xs opacity-80">{o.count}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 const JOB_TONE: Record<JobStatus, Tone> = {
   pending: "amber",

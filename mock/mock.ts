@@ -11,6 +11,7 @@ export const MOCK_USER_EMAIL = "listener@blac.test";
 export const MOCK_USER_PASSWORD = "mock-user-pass";
 
 interface User {
+  signalsExcluded?: boolean;
   id: string;
   email: string;
   displayName: string;
@@ -23,6 +24,8 @@ interface User {
 }
 interface Artist {
   avatarImageId?: string;
+  /** given to its owner by an administrator (it returns to the catalog if the account goes) */
+  received?: boolean;
   id: string;
   name: string;
   bio: string;
@@ -229,6 +232,8 @@ function seedData(now: number) {
   return { users, artists, releases, tracks, playlists, audit, groups };
 }
 
+import { checkLyrics, editable, type Lyrics } from "../src/lib/lyrics";
+
 class HttpErr extends Error {
   constructor(public status: number, public code: string, message: string, public headers: Record<string, string> = {}) {
     super(message);
@@ -303,10 +308,121 @@ export function createMock(opts: MockOptions = {}): Mock {
       verificationMessage: a.verificationMessage || undefined, requestedAt: a.requestedAt,
     };
   };
+  const artistStorage = (a: Artist) => {
+    const MB = 1024 * 1024;
+    const rels = state.releases.filter((r) => r.artistId === a.id);
+    const count = (pub: boolean) => rels.filter((r) => (r.visibility === "public") === pub).reduce((s, r) => s + state.tracks.filter((t) => t.releaseId === r.id).length, 0);
+    const published = count(true);
+    const unpublished = count(false);
+    const audio = (files: number) => ({ files, bytes: files * 7 * MB });
+    const pictures = (a.avatarImageId ? 1 : 0) + rels.filter((r) => r.coverImageId).length;
+    const all = (published + unpublished) * 7 * MB;
+    return {
+      usedBytes: a.received ? 0 : all,
+      ...(a.received ? { teamUploadBytes: all } : {}),
+      quotaBytes: a.ownerUserId ? a.quotaBytes : 0,
+      breakdown: { publishedAudio: audio(published), unpublishedAudio: audio(unpublished), unfinishedUploads: audio(0), playbackAudio: { files: (published + unpublished) * 3, bytes: (published + unpublished) * 4 * MB }, pictures: { files: pictures, bytes: pictures * MB } },
+    };
+  };
+  interface Stuck { uploadId: string; title: string; state: "stuck" | "working" | "waiting" | "failed" | "ready"; attempts: number; since: number; error: string; fileKept: boolean; onTransfer: boolean; imported: boolean }
+  const stuckList: Stuck[] = [
+    { uploadId: "up_stuck", title: "Nile Morning", state: "stuck", attempts: 1, since: now - 14 * 60_000, error: "", fileKept: true, onTransfer: false, imported: true },
+    { uploadId: "up_working", title: "Long Concert Take", state: "working", attempts: 1, since: now - 6 * 60_000, error: "", fileKept: true, onTransfer: false, imported: false },
+    { uploadId: "up_waiting", title: "Evening Song", state: "waiting", attempts: 0, since: now - 90_000, error: "", fileKept: true, onTransfer: false, imported: false },
+    { uploadId: "up_held", title: "Channel Upload", state: "waiting", attempts: 0, since: now - 300_000, error: "", fileKept: true, onTransfer: true, imported: false },
+    { uploadId: "up_failed_kept", title: "Drum Intro", state: "failed", attempts: 3, since: now - 3600_000, error: "processing did not finish, please upload again", fileKept: true, onTransfer: false, imported: false },
+    { uploadId: "up_failed_gone", title: "Broken File", state: "failed", attempts: 1, since: now - 86_400_000, error: "the file could not be read as audio", fileKept: false, onTransfer: false, imported: false },
+  ];
+  const processingRow = (u: Stuck) => {
+    const rel = state.releases[0]!;
+    const art = state.artists.find((a) => a.id === rel.artistId)!;
+    const at = new Date(u.since).toISOString();
+    return {
+      uploadId: u.uploadId, title: u.title, artistId: art.id, artistName: art.name, releaseId: rel.id, releaseTitle: rel.title,
+      status: u.state === "waiting" ? "queued" : u.state === "failed" ? "failed" : "processing", state: u.state, attempts: u.attempts, sizeBytes: 6_900_000, createdAt: at, updatedAt: at,
+      startedAt: u.state === "stuck" || u.state === "working" ? at : null, lastSignalAt: u.state === "stuck" ? at : u.state === "working" ? new Date().toISOString() : null,
+      waitingOnTransfer: u.onTransfer, import: u.imported ? { jobId: "imp_running", artistName: art.name } : null, error: u.error,
+      canRetry: u.state === "stuck" || (u.state === "failed" && u.fileKept), canForce: u.state === "working",
+    };
+  };
+  const featured: string[] = [];
+  const lyrics = new Map<string, Lyrics>();
+  // things waiting: a new release, a change to a live one, and (added below) a new artist profile
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose sample data
+  const reviews: any[] = state.releases.slice(0, 2).map((rel, i) => ({
+    subject: "release",
+    id: "rev_mock" + (i + 1), releaseId: rel.id, title: rel.title, type: rel.type, kind: (i === 0 ? "new" : "update") as "new" | "update", status: "pending", revision: 1,
+    artist: { id: rel.artistId, name: state.artists.find((a) => a.id === rel.artistId)?.name ?? "Artist" }, submittedAt: new Date(Date.now() - (i === 0 ? 3 : 1) * 3600_000).toISOString(),
+    publishAt: null as string | null, decidedAt: null as string | null, reason: "", changes: i === 0 ? null : ["Title", "Lyrics"],
+    detail: {
+      decidedBy: null as { id: string; email: string } | null,
+      release: { description: "", genre: "Afrobeats", releaseDate: null, visibility: i === 0 ? "draft" : "public" },
+      tracks: state.tracks.filter((t) => t.releaseId === rel.id).map((t, k) => ({ trackId: t.id, title: t.title, trackNumber: k + 1, durationMs: t.durationMs, explicit: false, genre: "Afrobeats", featuredArtists: [] as string[], lyrics: null })),
+      credits: [{ name: "A Producer", role: "producer" }],
+      changeItems: i === 0 ? [] : [
+        { kind: "release", label: "Title", field: "title", approved: rel.title, proposed: rel.title + " (Remix)" },
+        { kind: "lyrics", label: "Lyrics", approved: null, proposed: { synced: true, text: "Hello", lines: [{ timeMs: 1000, text: "Hello", translation: "Hi" }] } },
+      ],
+    },
+  }));
+  type Guest = { creditId: string; releaseId: string; trackId: string; artistId?: string; name: string; addedByTeam: boolean };
+  const guests: Guest[] = [];
+  const releaseProgress = (r: Release) => {
+    const views = releaseTracks(r.id).map(metaView);
+    const n = (f: (s: string) => boolean) => views.filter((v) => f(v.status)).length;
+    const enriched = n((s) => s !== "not_started");
+    const verified = n((s) => s === "verified");
+    return { total: views.length, enriched, pendingReview: n((s) => s === "pending_review"), verified, status: views.length > 0 && verified === views.length ? "completed" : enriched === 0 ? "not_started" : "in_progress" };
+  };
+  const term = (id: string, label: string, active = true) => ({ id, label, active });
+  const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  const terms = (names: string[]) => names.map((n) => term(slug(n), n));
+  const lang = (groupId: string, names: string[]) => terms(names).map((t) => ({ ...t, groupId }));
+  const taxonomy = {
+    requiredFields: ["language"],
+    languageGroups: [{ id: "runyakitara", label: "Runyakitara" }, { id: "central_eastern_bantu", label: "Central and Eastern Bantu" }, { id: "luo", label: "Luo / Lwo" }, { id: "ateker", label: "Ateker" }, { id: "moru_madi", label: "Moru–Ma'di" }, { id: "national_international", label: "National and International" }],
+    languages: [...lang("runyakitara", ["Runyankole", "Rukiga", "Runyoro", "Rutooro"]), ...lang("central_eastern_bantu", ["Luganda", "Lussese", "Lusoga", "Lugwere", "Luruuli"]), ...lang("luo", ["Acholi", "Lango", "Alur", "Kumam", "Adhola"]), ...lang("ateker", ["Ateso", "Ngakarimojong", "Jie", "Dodoth", "Pokot"]), ...lang("moru_madi", ["Lugbara", "Aringa", "Madi"]), ...lang("national_international", ["English", "Swahili"])],
+    cultures: terms(["Acholi", "Lango", "Baganda", "Basoga", "Banyankole", "Bakiga", "Banyoro", "Batooro", "Iteso", "Karamojong", "Alur", "Lugbara", "Madi"]),
+    regions: terms(["Central", "Eastern", "Northern", "Western", "Karamoja", "West Nile"]),
+    genres: [...terms(["Afrobeats", "Afropop", "Hip-Hop", "R&B", "Dancehall", "Gospel", "Traditional", "Kadongo Kamu", "Reggae", "Amapiano"]).map((t) => ({ ...t, parentId: null as string | null })), { ...term("old_style", "Old Style", false), parentId: null }],
+    attributes: { mood: terms(["Happy", "Sad", "Romantic", "Energetic", "Inspirational", "Spiritual", "Relaxed", "Aggressive", "Nostalgic"]), energy: terms(["Low", "Medium", "High"]).map((t) => ({ ...t, id: "energy_" + t.id })), danceability: terms(["Low", "Medium", "High"]).map((t) => ({ ...t, id: "dance_" + t.id })), instrumentation: terms(["Acoustic", "Electronic", "Percussion", "Guitar", "Piano", "Traditional Instruments", "Brass", "Strings"]) },
+  };
+  type MetaLink = { id: string; role?: string; primary?: boolean; source: string; verification: string; confidence: number | null; verifiedBy: { id: string; email: string } | null; verifiedAt: string | null };
+  interface Meta { languageUnknown: boolean; languages: MetaLink[]; cultures: MetaLink[]; regions: MetaLink[]; genres: MetaLink[]; attributes: Record<string, MetaLink[]>; version: number; touched: boolean; updatedAt: string | null; updatedBy: { id: string; email: string } | null; submittedAt?: string | null; unknownReview?: MetaLink | null; reviewNote?: string }
+  const metas = new Map<string, Meta>();
+  const fresh = (source: string, id: string): MetaLink => ({ id, source, verification: "pending", confidence: null, verifiedBy: null, verifiedAt: null });
+  const metaOf = (t: Track) => {
+    let m = metas.get(t.id);
+    if (!m) {
+      const g = taxonomy.genres.find((x) => x.label === t.genre);
+      m = { languageUnknown: false, languages: [], cultures: [], regions: [], genres: g ? [{ ...fresh("imported", g.id), primary: true }] : [], attributes: { mood: [], energy: [], danceability: [], instrumentation: [] }, version: 1, touched: false, updatedAt: null, updatedBy: null };
+      metas.set(t.id, m);
+    }
+    return m;
+  };
+  const metaView = (t: Track) => {
+    const m = metaOf(t);
+    const rel = state.releases.find((r) => r.id === t.releaseId)!;
+    const art = state.artists.find((a) => a.id === rel.artistId)!;
+    const entered = m.touched && (m.languageUnknown || [m.languages, m.cultures, m.regions, m.genres, ...Object.values(m.attributes)].some((l) => l.some((x) => x.source !== "imported")));
+    return {
+      trackId: t.id, title: t.title, trackNumber: t.trackNumber ?? null, durationMs: t.durationMs, artist: { id: art.id, name: art.name }, featuredArtists: [], release: { id: rel.id, title: rel.title, type: rel.type, releaseDate: rel.releaseDate ?? null }, isrc: null,
+      ...(() => {
+        const live = (l: MetaLink[]) => l.filter((x) => x.verification !== "rejected");
+        const unknownOk = m.languageUnknown && m.unknownReview?.verification !== "rejected";
+        const missing = unknownOk || live(m.languages).length > 0 ? [] : ["language"];
+        const required = [...live(m.languages), ...(m.languageUnknown && m.unknownReview ? [m.unknownReview] : [])];
+        const verified = missing.length === 0 && required.every((x) => x.verification === "verified");
+        return { status: !entered ? "not_started" : verified ? "verified" : missing.length === 0 ? "pending_review" : "in_progress", missingRequired: missing };
+      })(),
+      submittedAt: m.submittedAt ?? null, submittedBy: null, languageUnknownReview: m.languageUnknown ? (m.unknownReview ?? null) : null, reviewNote: m.reviewNote ?? "",
+      languageUnknown: m.languageUnknown, languages: m.languages, cultures: m.cultures, regions: m.regions, genres: m.genres, attributes: m.attributes, version: "v" + m.version, updatedAt: m.updatedAt, updatedBy: m.updatedBy,
+    };
+  };
   const releaseRow = (r: Release) => {
     const a = state.artists.find((x) => x.id === r.artistId);
     return {
-      id: r.id, title: r.title, type: r.type, kind: r.type === "single" ? "single" : releaseTracks(r.id).length <= 6 ? "ep" : "album", artistId: r.artistId, artistName: a?.name ?? "", visibility: r.visibility, takenDown: !!r.takedown,
+      id: r.id, releaseDate: r.releaseDate ?? null, metadata: releaseProgress(r), featured: featured.includes(r.id), title: r.title, type: r.type, kind: r.type === "single" ? "single" : releaseTracks(r.id).length <= 6 ? "ep" : "album", artistId: r.artistId, artistName: a?.name ?? "", visibility: r.visibility, takenDown: !!r.takedown,
       previousVisibility: r.takedown ? r.prevVisibility : undefined, coverUrl: r.coverImageId ? mediaUrl(r.coverImageId) : undefined, trackCount: releaseTracks(r.id).length, publishedAt: r.publishedAt ?? null, createdAt: r.createdAt,
     };
   };
@@ -390,20 +506,24 @@ export function createMock(opts: MockOptions = {}): Mock {
   interface Job {
     jobId: string; status: "pending" | "processing" | "completed" | "completed_with_errors" | "failed" | "cancelled"; artist: string; artistId?: string; type: "single" | "album"; visibility: "draft" | "public";
     titles: string[]; failTitles: string[]; skipTitles: string[]; createdAt: string; startedAt: string | null; finishedAt: string | null; doneAtStart: number;
+    /** started, but earlier imports are being served */
+    behind?: boolean;
   }
   const someArtist = state.artists[0]!;
   const someRelease = state.releases[0]!;
   const jobs: Job[] = [
     { jobId: "imp_running", status: "processing", artist: "Judas Rapkwonledge", artistId: someArtist.id, type: "single", visibility: "draft", titles: Array.from({ length: 12 }, (_, i) => `Track ${i + 1}`), failTitles: [], skipTitles: ["Track 2"], createdAt: day(-0.02), startedAt: day(-0.015), finishedAt: null, doneAtStart: 4 },
+    { jobId: "imp_next", status: "processing", behind: true, artist: "Amara", type: "single", visibility: "public", titles: ["Sunrise", "Market Day", "Long Road"], failTitles: [], skipTitles: [], createdAt: day(-0.019), startedAt: day(-0.012), finishedAt: null, doneAtStart: 0 },
+    { jobId: "imp_later", status: "processing", behind: true, artist: "Obi", type: "album", visibility: "draft", titles: Array.from({ length: 9 }, (_, i) => `Part ${i + 1}`), failTitles: [], skipTitles: [], createdAt: day(-0.018), startedAt: day(-0.011), finishedAt: null, doneAtStart: 0 },
     { jobId: "imp_errors", status: "completed_with_errors", artist: someArtist.name, artistId: someArtist.id, type: "single", visibility: "public", titles: ["Example Song", "Other Song", "Third Song"], failTitles: ["Other Song"], skipTitles: ["Third Song"], createdAt: day(-1.2), startedAt: day(-1.19), finishedAt: day(-1.18), doneAtStart: 3 },
     { jobId: "imp_waiting", status: "pending", artist: "New Band", type: "album", visibility: "draft", titles: ["One", "Two"], failTitles: [], skipTitles: [], createdAt: day(-0.2), startedAt: null, finishedAt: null, doneAtStart: 0 },
     { jobId: "imp_old", status: "completed", artist: someArtist.name, artistId: someArtist.id, type: "album", visibility: "draft", titles: ["A", "B", "C", "D"], failTitles: [], skipTitles: [], createdAt: day(-9), startedAt: day(-9), finishedAt: day(-8.99), doneAtStart: 4 },
   ];
   const jobView = (j: Job, full: boolean) => {
     // a running job finishes one more track every few seconds
-    const done = j.status === "processing" ? Math.min(j.titles.length, j.doneAtStart + Math.floor((Date.now() - now) / 4000)) : j.status === "pending" || j.status === "cancelled" ? 0 : j.titles.length;
+    const done = j.behind ? 0 : j.status === "processing" ? Math.min(j.titles.length, j.doneAtStart + Math.floor((Date.now() - now) / 4000)) : j.status === "pending" || j.status === "cancelled" ? 0 : j.titles.length;
     const rows = j.titles.map((title, i) => {
-      let status: string = i < done ? "created" : j.status === "processing" && i === done ? "processing" : "waiting";
+      let status: string = i < done ? "created" : j.status === "processing" && !j.behind && (i === done || i === done + 1) ? "processing" : "waiting";
       if (status === "created" && j.failTitles.includes(title)) status = "failed";
       if (status === "created" && j.skipTitles.includes(title)) status = "skippedDuplicate";
       return { title, status, releaseId: status === "created" || status === "skippedDuplicate" ? someRelease.id : undefined, duration: status === "created" ? "3:05" : undefined, durationSeconds: status === "created" ? 185 : undefined };
@@ -421,6 +541,8 @@ export function createMock(opts: MockOptions = {}): Mock {
     };
   };
 
+  const blocks: { id: number; kind: "track" | "artist"; targetId: string; name: string; artistName: string; songs: number; reason: string; blockedBy: { id: string; email: string }; blockedAt: string }[] = [];
+
   const routes = (req: IncomingMessage, url: URL, body: Record<string, unknown>, actor: User): { status: number; data?: unknown } => {
     const m = req.method ?? "GET";
     const p = url.pathname.replace(/^\/v1\/admin/, "");
@@ -428,6 +550,30 @@ export function createMock(opts: MockOptions = {}): Mock {
     let mt: RegExpMatchArray | null;
     const ok = (data: unknown, status = 200) => ({ status, data });
     const none = { status: 204 } as const;
+
+    // ------------------------------------------------------------ song processing: stuck songs and retry
+    if (m === "GET" && p === "/processing") {
+      const live = stuckList.filter((u) => u.state !== "ready");
+      const rank = { stuck: 0, working: 1, waiting: 2, failed: 3 } as Record<string, number>;
+      const uploadsNow = [...live].sort((a, b) => rank[a.state]! - rank[b.state]!).map(processingRow);
+      const n = (st: string) => live.filter((u) => u.state === st).length;
+      return ok({ measuredAt: new Date().toISOString(), stuckAfterSeconds: 180, workerLastSeenAt: new Date(Date.now() - 2 * 60_000).toISOString(), counts: { stuck: n("stuck"), working: n("working"), waiting: n("waiting"), failed: n("failed") }, uploads: uploadsNow });
+    }
+    if ((mt = p.match(/^\/processing\/([^/]+)\/retry$/)) && m === "POST") {
+      const u = stuckList.find((x) => x.uploadId === mt![1]);
+      need(u, 404, "not_found", "upload not found");
+      need(u!.state !== "waiting", 409, "already_queued", "it is already in the queue");
+      need(u!.state !== "ready", 409, "not_stuck", "it has finished");
+      need(u!.state !== "working" || body.force === true, 409, "still_processing", "it is being worked on");
+      need(u!.state !== "failed" || u!.fileKept, 409, "file_gone", "the file was deleted: upload it again");
+      const was = u!.state;
+      u!.state = "waiting";
+      u!.attempts = 0;
+      u!.error = "";
+      u!.since = Date.now();
+      addAudit(actor, "upload.retry", "upload", u!.uploadId, u!.title, "", { was });
+      return ok(processingRow(u!));
+    }
 
     // ------------------------------------------------------------ server (storage and load), read only
     if (m === "GET" && p === "/system") {
@@ -443,9 +589,12 @@ export function createMock(opts: MockOptions = {}): Mock {
         server: { cpuCount: 2, load: { "1m": 0.9, "5m": 1.1, "15m": 1.04 }, uptimeSeconds: 12 * 86_400 + 5 * 3600, memory: usage(4 * GB, 2.3 * GB), swap: usage(2 * GB, 0.1 * GB), disk: usage(80 * GB, diskUsed) },
         storage: { measuredAt: new Date(Date.now() - 25 * 60_000).toISOString(), objects: Object.values(byKind).reduce((s, k) => s + k.objects, 0), objectBytes, byKind, databaseBytes, otherBytes: diskUsed - objectBytes - databaseBytes },
         topArtists: state.artists.slice(0, 6).map((a, i) => ({ artistId: a.id, name: a.name, tracks: 40 - i * 6, bytes: Math.round((7.5 - i) * GB) })),
-        work: { uploads: { pending: 1, queued: 3, processing: 1, failedLast24h: 2, oldestQueuedSeconds: 340 }, imports: { awaitingFiles: 1, processing: 1 }, emails: { waiting: 0, failedLast24h: 0 }, push: { waiting: 4, failedLast24h: 0 } },
+        work: { uploads: { pending: 1, queued: 3, processing: 1, stuck: stuckList.filter((u) => u.state === "stuck").length, failedLast24h: 2, oldestQueuedSeconds: 340 }, imports: { awaitingFiles: 1, processing: 1 }, emails: { waiting: 0, failedLast24h: 0 }, push: { waiting: 4, failedLast24h: 0 } },
         lastSampleAt: new Date(Date.now() - 3 * 60_000).toISOString(),
-        alerts: [{ level: "warning", code: "disk_low", message: "The disk is 82.5% full." }],
+        alerts: [
+          { level: "warning", code: "disk_low", message: "The disk is 82.5% full." },
+          ...(stuckList.some((u) => u.state === "stuck") ? [{ level: "warning", code: "upload_stuck", message: "A song is stuck in processing." }] : []),
+        ],
       });
     }
     if (m === "GET" && p === "/system/history") {
@@ -524,13 +673,109 @@ export function createMock(opts: MockOptions = {}): Mock {
       const pg = pageOf(rows, q);
       return ok({ total: pg.total, users: pg.rows.map((u) => ({ id: u.id, email: u.email, displayName: u.displayName, role: u.role, emailVerified: u.emailVerified, banned: !!u.ban, hasArtist: !!artistOfUser(u.id), createdAt: u.createdAt })) });
     }
+    // ------------------------------------------------------------ keeping songs and artists out of suggestions
+    if (p === "/recommendations/blocks" && m === "GET") return ok({ blocks });
+    if (p === "/recommendations/blocks" && m === "POST") {
+      const trackId = String(body.trackId ?? "");
+      const artistId = String(body.artistId ?? "");
+      const why = String(body.reason ?? "").trim();
+      need((trackId === "") !== (artistId === ""), 422, "validation_error", "send trackId or artistId, one of them");
+      need(why.length >= 3, 422, "validation_error", "reason must be 3 to 500 characters");
+      const track = state.tracks.find((t) => t.id === trackId);
+      const artist = state.artists.find((a) => a.id === artistId);
+      need(track || artist, 404, "not_found", "not found");
+      const target = trackId || artistId;
+      need(!blocks.some((b) => b.targetId === target), 409, "already_blocked", "it is already blocked");
+      const id = (blocks[0]?.id ?? 0) + 1;
+      blocks.unshift({ id, kind: trackId ? "track" : "artist", targetId: target, name: track?.title ?? artist!.name, artistName: trackId ? "Mock Artist" : "", songs: trackId ? 1 : 4, reason: why, blockedBy: { id: actor.id, email: actor.email }, blockedAt: new Date().toISOString() });
+      return ok({ id, removedFromPlaylists: trackId ? 1 : 0 }, 201);
+    }
+    if ((mt = p.match(/^\/recommendations\/blocks\/(\d+)$/)) && m === "DELETE") {
+      const at = blocks.findIndex((b) => b.id === Number(mt![1]));
+      need(at >= 0, 404, "not_found", "not found");
+      blocks.splice(at, 1);
+      return none;
+    }
+    // ------------------------------------------------------------ the recommendation engine's reports
+    if (m === "GET" && p === "/recommendations/readiness") {
+      const playable = state.tracks.length;
+      const has = (key: "languages" | "cultures" | "regions") => state.tracks.filter((x) => metaOf(x)[key].some((l) => l.verification === "verified")).length;
+      return ok({
+        algorithm: "hybrid-1",
+        songs: { playable, withGenre: state.tracks.filter((x) => metaOf(x).genres.length > 0).length, withVerifiedLanguage: has("languages"), withVerifiedRegion: has("regions"), withVerifiedCulture: has("cultures"), withVerifiedSound: 0 },
+        listeners: { counted: state.users.length - 1, withChoices: 5, heardTenSongs: 2, leftOut: state.users.filter((u) => u.role === "admin" || u.signalsExcluded).length },
+      });
+    }
+    if (m === "GET" && p === "/recommendations/outcomes") {
+      const days = Math.min(Number(q.get("days") ?? 14) || 14, 90);
+      const row = (surface: string, slot: string, suggested: number, listened: number, completed: number, skipped: number, kept: number) => ({ surface, algorithm: "hybrid-1", slot, suggested, listened, completed, skipped, kept, listeners: 3 });
+      return ok({ days, rows: days <= 7 ? [] : [row("mix", "discovery", 42, 9, 5, 3, 1), row("mix", "familiar", 110, 48, 36, 8, 6), row("your_sound", "familiar", 40, 22, 17, 3, 4)] });
+    }
+    if ((mt = p.match(/^\/users\/([^/]+)\/recommendations$/)) && m === "GET") {
+      const u = getUser(mt[1]!);
+      need(u, 404, "not_found", "user not found");
+      const surface = q.get("surface") ?? "your_sound";
+      need(surface === "your_sound" || surface === "mix", 400, "bad_request", "surface must be your_sound or mix");
+      need(surface !== "mix" || !!q.get("seed"), 422, "validation_error", "seed must be a song people can play");
+      const rich = u!.id === "usr_listener";
+      const items = rich || surface === "mix"
+        ? state.tracks.filter((t) => !blocks.some((b) => b.targetId === t.id)).slice(0, 6).map((t, i) => ({
+            trackId: t.id, title: t.title, artistId: "art_mock", artistName: "Mock Artist " + (i + 1), slot: i % 3 === 2 ? "discovery" : "familiar", score: 0.62 - i * 0.05,
+            reasons: i % 3 === 2 ? ["genre_you_chose", "new_artist_for_you", "under_discovered"] : ["favourite_artist", "genre_you_play", "preferred_language"],
+            parts: { artist: 0.224, genre: 0.16, popularity: 0.04, heard_lately: i === 3 ? -0.2 : 0 },
+          }))
+        : [];
+      return ok({
+        algorithm: "hybrid-1", discoveryMode: "explore_more", candidates: items.length ? 240 : 0,
+        basis: { preferredLanguages: rich ? ["luganda"] : [], understoodLanguages: rich ? ["english"] : [], regions: [], genres: rich ? ["gospel"] : [], favouriteArtists: rich ? 2 : 0, followedArtists: rich ? 1 : 0, songsWithHistory: rich ? 14 : 0 },
+        items,
+      });
+    }
+    if ((mt = p.match(/^\/users\/([^/]+)\/signals$/)) && m === "PUT") {
+      const u = getUser(mt[1]!);
+      need(u, 404, "not_found", "user not found");
+      const excluded = body.excluded === true;
+      need(excluded || u!.role !== "admin", 409, "is_admin", "administrators are always left out of recommendation signals");
+      u!.signalsExcluded = excluded;
+      return none;
+    }
+    if ((mt = p.match(/^\/users\/([^/]+)\/preference-graph$/)) && m === "GET") {
+      const u = getUser(mt[1]!);
+      need(u, 404, "not_found", "user not found");
+      const rich = u!.id === "usr_listener";
+      const none = { plays: 0, finished: 0, skipped: 0, replays: 0, likes: 0, playlistAdds: 0, savedSongs: 0 };
+      const node = (type: string, id: string, label: string, more: Record<string, unknown> = {}, activity: Partial<typeof none> = {}) => ({ id: type + ":" + id, type, label, chosen: false, ...more, activity: { ...none, ...activity } });
+      const [a1, a2, a3] = state.artists.filter((x) => !x.ban);
+      const nodes = rich
+        ? [
+            node("language", "luganda", "Luganda", { chosen: true }),
+            node("language", "english", "English", { understood: true }),
+            node("region", "central", "Central", { chosen: true }),
+            node("genre", "afrobeats", "Afrobeats", { chosen: true }, { plays: 48, finished: 40, likes: 6, savedSongs: 5 }),
+            node("genre", "gospel", "Gospel", { chosen: true }),
+            node("genre", "hip-hop", "Hip-Hop", {}, { plays: 12, finished: 3, skipped: 9 }),
+            node("artist", a1!.id, a1!.name, { chosen: true, followed: true }, { plays: 31, finished: 27, replays: 4, likes: 5, playlistAdds: 2, savedSongs: 4 }),
+            node("artist", a2!.id, a2!.name, { followed: true }),
+            node("artist", a3!.id, a3!.name, {}, { plays: 14, finished: 6, skipped: 2 }),
+          ]
+        : u!.id.endsWith("1")
+          ? [node("language", "acholi", "Acholi", { chosen: true }), node("genre", "dancehall", "Dancehall", { chosen: true })]
+          : [];
+      const link = (artist: string, genre: string, weight: number) => ({ source: "artist:" + artist, target: "genre:" + genre, kind: "artist_genre", weight });
+      return ok({
+        onboarding: { completed: nodes.length > 0, updatedAt: nodes.length ? new Date(Date.now() - 6 * 86400_000).toISOString() : null, discoveryMode: rich ? "explore_more" : "" },
+        windowDays: 90,
+        nodes,
+        links: rich ? [link(a1!.id, "afrobeats", 7), link(a2!.id, "gospel", 1), link(a3!.id, "hip-hop", 4), link(a3!.id, "afrobeats", 2)] : [],
+      });
+    }
     if ((mt = p.match(/^\/users\/([^/]+)$/)) && m === "GET") {
       const u = getUser(mt[1]!);
       need(u, 404, "not_found", "user not found");
       const a = artistOfUser(u!.id);
       return ok({
         id: u!.id, email: u!.email, displayName: u!.displayName, role: u!.role, emailVerified: u!.emailVerified, banned: !!u!.ban, hasArtist: !!a, createdAt: u!.createdAt,
-        ban: u!.ban ? { at: u!.ban.at, reason: u!.ban.reason, by: u!.ban.by === "usr_admin" ? { id: "usr_admin", email: MOCK_ADMIN_EMAIL } : null } : null, signIn: { password: u!.methods.includes("password"), apple: u!.methods.includes("apple"), google: u!.methods.includes("google") }, artist: a ? { id: a.id, name: a.name } : null, counts: { playlists: 2, followedArtists: 5, savedItems: 14 }, lastSeenAt: u!.lastSeenAt ?? null, pushEnabled: u!.id.endsWith("3"),
+        ban: u!.ban ? { at: u!.ban.at, reason: u!.ban.reason, by: u!.ban.by === "usr_admin" ? { id: "usr_admin", email: MOCK_ADMIN_EMAIL } : null } : null, signIn: { password: u!.methods.includes("password"), apple: u!.methods.includes("apple"), google: u!.methods.includes("google") }, artist: a ? { id: a.id, name: a.name } : null, counts: { playlists: 2, followedArtists: 5, savedItems: 14 }, lastSeenAt: u!.lastSeenAt ?? null, pushEnabled: u!.id.endsWith("3"), signalsExcluded: u!.role === "admin" || !!u!.signalsExcluded,
       });
     }
     if ((mt = p.match(/^\/users\/([^/]+)\/(ban|unban|deletion-preview)$/)) && (m === "POST" || m === "GET")) {
@@ -540,6 +785,7 @@ export function createMock(opts: MockOptions = {}): Mock {
       if (op === "deletion-preview" && m === "GET") {
         const a = artistOfUser(u!.id);
         const rels = a ? state.releases.filter((r) => r.artistId === a.id) : [];
+        if (a?.received) return ok({ artist: { id: a.id, name: a.name, returnsToCatalog: true }, releases: 0, tracks: 0, playlists: 2, uploads: 0, storageBytes: 0, libraryItems: 14, sessions: 1 });
         return ok({ artist: a ? { id: a.id, name: a.name } : null, releases: rels.length, tracks: rels.reduce((s, r) => s + releaseTracks(r.id).length, 0), playlists: 2, uploads: 0, storageBytes: a?.usedBytes ?? 0, libraryItems: 14, sessions: 1 });
       }
       need(m === "POST" && op !== "deletion-preview", 405, "method_not_allowed", "method not allowed");
@@ -567,7 +813,10 @@ export function createMock(opts: MockOptions = {}): Mock {
       const reason = reasonOf(body);
       need(body.confirmEmail === u!.email, 422, "confirmation_mismatch", "confirmEmail does not match");
       const a = artistOfUser(u!.id);
-      if (a) removeArtist(a.id);
+      if (a?.received) {
+        a.ownerUserId = undefined;
+        a.received = false;
+      } else if (a) removeArtist(a.id);
       state.users.splice(state.users.indexOf(u!), 1);
       addAudit(actor, "user.delete", "user", u!.id, u!.email, reason);
       return none;
@@ -596,13 +845,42 @@ export function createMock(opts: MockOptions = {}): Mock {
       const owner = a!.ownerUserId ? getUser(a!.ownerUserId) : undefined;
       const rels = state.releases.filter((r) => r.artistId === a!.id);
       return ok({
-        id: a!.id, name: a!.name, bio: a!.bio,
+        id: a!.id, name: a!.name, bio: a!.bio, imageUrl: artistRow(a!).imageUrl,
         verification: { state: a!.verification, message: a!.verificationMessage, note: a!.verificationNote, requestedAt: a!.requestedAt ?? null },
         flagged: a!.flagged, ban: a!.ban, owner: owner ? { id: owner.id, email: owner.email, displayName: owner.displayName } : null,
-        storage: { usedBytes: a!.usedBytes, quotaBytes: a!.quotaBytes },
+        storage: artistStorage(a!),
         counts: { releases: rels.length, publicReleases: rels.filter((r) => r.visibility === "public").length, tracks: rels.reduce((s, r) => s + releaseTracks(r.id).length, 0), followers: a!.followerCount, plays: a!.followerCount * 9 },
         recentGrants: [...a!.grants].reverse().slice(0, 10), createdAt: a!.createdAt,
       });
+    }
+    if ((mt = p.match(/^\/artists\/([^/]+)\/owner$/)) && (m === "POST" || m === "DELETE")) {
+      const a = state.artists.find((x) => x.id === mt![1]);
+      need(a, 404, "not_found", "artist not found");
+      const reason = reasonOf(body);
+      if (m === "POST") {
+        const u = getUser(String(body.userId ?? ""));
+        need(u, 404, "user_not_found", "user not found");
+        need(!a!.ownerUserId, 409, "already_owned", "the artist already has an owner");
+        need(!a!.ban, 409, "artist_banned", "this artist is banned");
+        need(!u!.ban, 409, "user_banned", "this user is banned");
+        need(u!.emailVerified, 409, "email_unverified", "the email address is not verified");
+        need(!artistOfUser(u!.id), 409, "user_has_artist", "this user already has an artist profile");
+        a!.ownerUserId = u!.id;
+        a!.received = true;
+        if (!a!.grants.some((g) => g.kind === "free")) {
+          a!.quotaBytes = 10 * 1024 ** 3;
+          a!.grants.push({ id: a!.grants.length + 1, kind: "free", bytes: a!.quotaBytes, note: "welcome allowance", createdAt: new Date().toISOString() });
+        }
+        addAudit(actor, "artist.assign", "artist", a!.id, a!.name, reason, { userId: u!.id, email: u!.email });
+      } else {
+        need(a!.ownerUserId, 409, "not_owned", "the artist has no owner");
+        const was = getUser(a!.ownerUserId!);
+        a!.ownerUserId = undefined;
+        a!.received = false;
+        if (a!.verification === "pending") a!.verification = "unverified";
+        addAudit(actor, "artist.unassign", "artist", a!.id, a!.name, reason, { userId: was?.id, email: was?.email });
+      }
+      return routes({ method: "GET" } as IncomingMessage, new URL(`http://mock/v1/admin/artists/${a!.id}`), {}, actor);
     }
     if ((mt = p.match(/^\/artists\/([^/]+)$/)) && m === "PATCH") {
       const a = state.artists.find((x) => x.id === mt![1]);
@@ -616,6 +894,7 @@ export function createMock(opts: MockOptions = {}): Mock {
         a!.bio = body.bio as string;
       }
       if (body.imageId !== undefined) {
+        need(!a!.ownerUserId, 422, "owned_artist", "this artist's picture is its owner's profile picture");
         const cid = String(body.imageId);
         if (cid === "") a!.avatarImageId = undefined;
         else {
@@ -704,7 +983,338 @@ export function createMock(opts: MockOptions = {}): Mock {
       return none;
     }
 
+    // --------------------------------------------------- release reviews
+    if (!reviews.some((x) => x.subject === "profile")) {
+      const a = state.artists[0]!;
+      const values = { name: a.name, bio: "Singer from Gulu." };
+      reviews.push({ subject: "profile", id: "arv_mock1", releaseId: "", title: a.name, type: "profile", kind: "new", status: "pending", revision: 1, artist: { id: a.id, name: a.name }, submittedAt: new Date(Date.now() - 600_000).toISOString(), publishAt: null, decidedAt: null, reason: "", changes: [], detail: { decidedBy: null, artistCreatedAt: new Date(Date.now() - 86400_000).toISOString(), approved: values, proposed: values, changeItems: [], releaseReviewIds: [] } });
+    }
+    if (p === "/reviews" && m === "GET") {
+      const status = q.get("status") || "pending";
+      const rows = reviews.filter((x) => (status === "all" || x.status === status) && (!q.get("kind") || x.kind === q.get("kind")) && (!q.get("subject") || x.subject === q.get("subject")));
+      const { rows: page, total } = pageOf(rows, q);
+      return ok({ reviews: page.map((x) => ({ ...x, detail: undefined })), total, pending: reviews.filter((x) => x.status === "pending").length });
+    }
+    if ((mt = p.match(/^\/reviews\/([^/]+?)(?:\/(approve|reject))?$/))) {
+      const rv = reviews.find((x) => x.id === mt![1]);
+      need(rv, 404, "not_found", "review not found");
+      if (mt[2]) {
+        need(m === "POST", 405, "method_not_allowed", "method not allowed");
+        need(rv!.status === "pending", 409, "not_pending", "this is not waiting");
+        need(body.revision === rv!.revision, 409, "review_changed", "it changed");
+        const reason = String(body.reason ?? "").trim();
+        need(mt[2] === "approve" || (reason.length >= 3 && reason.length <= 500), 422, "validation_error", "give a reason of 3-500 characters");
+        rv!.status = mt[2] === "approve" ? "approved" : "rejected";
+        rv!.reason = mt[2] === "reject" ? reason : "";
+        rv!.decidedAt = new Date().toISOString();
+        rv!.detail.decidedBy = actorOf(actor);
+        addAudit(actor, "review." + mt[2], "release", rv!.releaseId, rv!.title, rv!.reason, { reviewId: rv!.id, kind: rv!.kind, revision: rv!.revision });
+      }
+      const { detail, ...row } = rv!;
+      return ok({ ...row, ...detail });
+    }
+
+    // ----------------------------------------------------------- lyrics
+    if ((mt = p.match(/^\/tracks\/([^/]+)\/lyrics$/)) && (m === "GET" || m === "PUT" || m === "DELETE")) {
+      const t = state.tracks.find((x) => x.id === mt![1]);
+      need(t, 404, "not_found", "track not found");
+      if (m === "DELETE") {
+        if (lyrics.delete(t!.id)) addAudit(actor, "track.lyrics_delete", "track", t!.id, t!.title);
+        return none;
+      }
+      if (m === "PUT") {
+        const typed = String(body.lrc || body.text || "");
+        const c = checkLyrics(typed, t!.durationMs);
+        need(c.kind !== "empty", 422, "validation_error", "send text or lrc");
+        need(!c.errors.length, 422, "validation_error", c.errors[0]?.message ?? "");
+        const timed = c.kind === "timed";
+        lyrics.set(t!.id, { synced: timed, lines: c.lines, text: timed ? c.lines.map((l) => l.text).join("\n") : typed.trim(), ...(timed ? { lrc: typed.trim() } : {}) });
+        addAudit(actor, "track.lyrics_update", "track", t!.id, t!.title, "", { synced: timed, lines: c.lines.length, translated: c.translated });
+      }
+      const saved = lyrics.get(t!.id) ?? null;
+      const untranslated = saved?.synced ? checkLyrics(editable(saved), 0) : undefined;
+      return ok({ trackId: t!.id, title: t!.title, durationMs: t!.durationMs, lyrics: saved, untranslatedLines: untranslated ? untranslated.lyricLines - untranslated.translated : 0 });
+    }
+
+    // ------------------------------------------------- featured artists
+    const guestView = (releaseId: string) => {
+      const shape = (c: Guest) => {
+        const a = state.artists.find((x) => x.id === c.artistId);
+        return { creditId: c.creditId, ...(c.artistId ? { artistId: c.artistId } : {}), name: c.addedByTeam && a ? a.name : c.name, verified: c.addedByTeam && a?.verification === "verified", addedByTeam: c.addedByTeam, artistBanned: !!a?.ban };
+      };
+      const rows = guests.filter((c) => c.releaseId === releaseId);
+      return {
+        releaseId,
+        release: rows.filter((c) => !c.trackId).map(shape),
+        tracks: releaseTracks(releaseId).map((t) => ({ trackId: t.id, title: t.title, artists: rows.filter((c) => c.trackId === t.id).map(shape) })),
+      };
+    };
+    if ((mt = p.match(/^\/(releases|tracks)\/([^/]+)\/featured-artists$/)) && (m === "GET" || m === "POST")) {
+      const onTrack = mt[1] === "tracks";
+      const track = onTrack ? state.tracks.find((t) => t.id === mt![2]) : undefined;
+      const rel = state.releases.find((x) => x.id === (onTrack ? track?.releaseId : mt![2]));
+      need(rel, 404, "not_found", onTrack ? "track not found" : "release not found");
+      if (m === "POST") {
+        const a = state.artists.find((x) => x.id === body.artistId);
+        need(a && a.id !== rel!.artistId, 422, "validation_error", "choose another artist");
+        need(!a!.ban, 409, "artist_banned", "this artist is banned");
+        const trackId = track?.id ?? "";
+        const old = guests.find((c) => c.releaseId === rel!.id && c.trackId === trackId && c.artistId === a!.id);
+        if (!old?.addedByTeam) {
+          need(guests.filter((c) => c.releaseId === rel!.id).length < 100, 409, "too_many_credits", "too many credits");
+          if (old) old.addedByTeam = true;
+          else guests.push({ creditId: "crd_" + randomBytes(6).toString("hex"), releaseId: rel!.id, trackId, artistId: a!.id, name: a!.name, addedByTeam: true });
+          addAudit(actor, "release.feature_artist", "release", rel!.id, rel!.title, "", { artistId: a!.id, artistName: a!.name, trackId });
+        }
+      }
+      return ok(guestView(rel!.id));
+    }
+    if ((mt = p.match(/^\/featured-artists\/([^/]+)$/)) && m === "DELETE") {
+      const i = guests.findIndex((c) => c.creditId === mt![1]);
+      need(i >= 0, 404, "not_found", "feature not found");
+      const [gone] = guests.splice(i, 1);
+      const rel = state.releases.find((x) => x.id === gone!.releaseId)!;
+      addAudit(actor, "release.unfeature_artist", "release", rel.id, rel.title, "", { artistId: gone!.artistId ?? "", artistName: gone!.name, trackId: gone!.trackId });
+      return ok(guestView(rel.id));
+    }
+
     // --------------------------------------------------------- releases
+    if ((mt = p.match(/^\/releases\/([^/]+)\/featured$/)) && (m === "PUT" || m === "DELETE")) {
+      const r = state.releases.find((x) => x.id === mt![1]);
+      need(r, 404, "not_found", "release not found");
+      if (m === "PUT") {
+        need(r!.type !== "single", 409, "not_eligible", "only albums and EPs can be featured");
+        need(!r!.takedown, 409, "taken_down", "the release was taken down");
+        if (!featured.includes(r!.id)) featured.push(r!.id);
+      } else if (featured.includes(r!.id)) featured.splice(featured.indexOf(r!.id), 1);
+      addAudit(actor, m === "PUT" ? "release.feature" : "release.unfeature", "release", r!.id, r!.title);
+      return ok(releaseRow(r!));
+    }
+    if (p === "/featured-releases/order" && m === "PUT") {
+      const ids = Array.isArray(body.releaseIds) ? (body.releaseIds as string[]) : [];
+      need(ids.length === featured.length && new Set(ids).size === ids.length && ids.every((i) => featured.includes(i)), 422, "validation_error", "list every featured release once");
+      featured.splice(0, featured.length, ...ids);
+      addAudit(actor, "release.featured_order", "release", "featured", "Featured releases", "", { releaseIds: ids });
+      return { status: 204 };
+    }
+    if (m === "GET" && p === "/taxonomy") {
+      if (q.get("usage") !== "true") return ok(taxonomy);
+      const used = (key: "languages" | "cultures" | "regions" | "genres", id: string) => state.tracks.filter((x) => metaOf(x)[key].some((l) => l.id === id)).length;
+      const counted = <T extends { id: string }>(key: "languages" | "cultures" | "regions" | "genres", list: T[]) => list.map((x) => ({ ...x, usage: used(key, x.id) }));
+      return ok({ ...taxonomy, languages: counted("languages", taxonomy.languages), cultures: counted("cultures", taxonomy.cultures), regions: counted("regions", taxonomy.regions), genres: counted("genres", taxonomy.genres) });
+    }
+    if ((mt = p.match(/^\/taxonomy\/(language-groups|languages|cultures|regions|genres)(?:\/([^/]+))?$/)) && (m === "POST" ? !mt[2] : m === "PATCH" && !!mt[2])) {
+      type Item = { id: string; label: string; active?: boolean; groupId?: string | null; parentId?: string | null };
+      const kind = mt[1]!;
+      const list = (kind === "language-groups" ? taxonomy.languageGroups : taxonomy[kind as "languages" | "cultures" | "regions" | "genres"]) as Item[];
+      const item = mt[2] ? list.find((x) => x.id === mt![2]) : undefined;
+      need(m === "POST" || item, 404, "not_found", "no such entry");
+      const allowed = ["label", ...(kind === "languages" ? ["groupId"] : []), ...(kind === "genres" ? ["parentId"] : []), ...(m === "PATCH" && kind !== "language-groups" ? ["active"] : [])];
+      need(Object.keys(body).length > 0 && Object.keys(body).every((k) => allowed.includes(k)), 422, "validation_error", "a field this list does not have");
+      const label = typeof body.label === "string" ? body.label.trim() : undefined;
+      if (m === "POST" || "label" in body) {
+        need(label && label.length <= (kind === "genres" ? 40 : 60), 422, "validation_error", "the name is empty or too long");
+        need(!list.some((x) => x !== item && x.label.toLowerCase() === label!.toLowerCase()), 409, "duplicate_label", "already in this list");
+      }
+      if (body.groupId) need(taxonomy.languageGroups.some((g) => g.id === body.groupId), 422, "validation_error", "unknown group");
+      if (body.parentId) {
+        const parent = taxonomy.genres.find((g) => g.id === body.parentId);
+        need(parent && !parent.parentId && parent.id !== item?.id && !taxonomy.genres.some((g) => g.parentId === item?.id && !!item), 422, "invalid_parent", "not a possible parent");
+      }
+      if (!item) {
+        let id = slug(label!) || "entry";
+        while (list.some((x) => x.id === id)) id += "_2";
+        const made: Item = { id, label: label!, ...(kind === "language-groups" ? {} : { active: true }), ...(kind === "languages" ? { groupId: (body.groupId as string | null) ?? null } : {}), ...(kind === "genres" ? { parentId: (body.parentId as string | null) ?? null } : {}) };
+        list.push(made);
+        addAudit(actor, "taxonomy.create", "taxonomy", made.id, made.label, "", { kind });
+        return { status: 201, data: made };
+      }
+      const before = item.label;
+      Object.assign(item, body, label === undefined ? {} : { label });
+      if (kind === "genres" && label !== undefined) for (const x of [...state.tracks, ...state.releases]) if (x.genre === before) x.genre = label;
+      addAudit(actor, "taxonomy.update", "taxonomy", item.id, item.label, "", { kind, changed: body });
+      return ok(item);
+    }
+    if ((mt = p.match(/^\/tracks\/([^/]+)\/metadata\/(submit|review)$/)) && m === "POST") {
+      const t = state.tracks.find((x) => x.id === mt![1]);
+      need(t, 404, "not_found", "track not found");
+      const cur = metaOf(t!);
+      need(body.version === "v" + cur.version, 409, "stale_version", "the track was changed meanwhile");
+      if (mt[2] === "submit") {
+        need(metaView(t!).missingRequired.length === 0, 422, "missing_required", "required metadata is missing");
+        if (!cur.submittedAt) {
+          cur.submittedAt = new Date().toISOString();
+          cur.reviewNote = "";
+          cur.touched = true;
+          cur.version++;
+          addAudit(actor, "track.metadata_submit", "track", t!.id, t!.title);
+        }
+        return ok(metaView(t!));
+      }
+      const items = (body.items ?? []) as { category: string; id: string }[];
+      const decision = body.decision === "reject" ? "rejected" : "verified";
+      const note = String(body.note ?? "").trim();
+      need(items.length > 0 && (decision === "verified" || note.length >= 3), 422, "validation_error", "choose values, and give a reason when rejecting");
+      const found = items.map((i) => {
+        if (i.category === "languageUnknown") return cur.languageUnknown ? cur.unknownReview : undefined;
+        const list = (cur as unknown as Record<string, MetaLink[]>)[i.category] ?? cur.attributes[i.category];
+        return list?.find((x) => x.id === i.id);
+      });
+      need(found.every(Boolean), 422, "validation_error", "a value is not on this track");
+      for (const x of found) Object.assign(x!, { verification: decision, verifiedBy: actorOf(actor), verifiedAt: new Date().toISOString() });
+      cur.reviewNote = decision === "rejected" ? note : "";
+      if (decision === "rejected") cur.submittedAt = null;
+      cur.version++;
+      addAudit(actor, decision === "rejected" ? "track.metadata_reject" : "track.metadata_verify", "track", t!.id, t!.title, note);
+      return ok(metaView(t!));
+    }
+    if ((p === "/metadata/bulk" || p === "/metadata/bulk-verify") && m === "POST") {
+      const ids = Array.isArray(body.trackIds) ? (body.trackIds as string[]) : [];
+      need(ids.length >= 1 && ids.length <= 100 && new Set(ids).size === ids.length, 422, "validation_error", "choose 1-100 tracks");
+      const tracks = ids.map((id) => state.tracks.find((x) => x.id === id));
+      need(tracks.every(Boolean), 404, "not_found", "a track was not found");
+      const dryRun = body.dryRun === true;
+      if (!dryRun) {
+        const versions = (body.versions ?? {}) as Record<string, string>;
+        need(tracks.every((x) => versions[x!.id] === "v" + metaOf(x!).version), 409, "stale_version", "a track changed after the preview");
+      }
+      const verify = p.endsWith("verify");
+      type Value = { category: string; id: string };
+      type Change = { mode: string; values?: { id: string; role?: string; primary?: boolean }[]; ids?: string[] };
+      const changes = (body.changes ?? {}) as Partial<Record<"languages" | "genres" | "regions", Change>>;
+      const categories = (body.categories ?? []) as string[];
+      need(verify ? categories.length > 0 : Object.keys(changes).length > 0, 422, "validation_error", "choose what to change");
+      const known = { languages: taxonomy.languages, genres: taxonomy.genres, regions: taxonomy.regions };
+      for (const [k, c] of Object.entries(changes)) {
+        const wanted = c!.values?.map((v) => v.id) ?? c!.ids ?? [];
+        need(wanted.length > 0, 422, "validation_error", "nothing chosen");
+        need(wanted.every((id) => known[k as keyof typeof known].some((x) => x.id === id && x.active)), 422, "invalid_taxonomy", "unknown choice");
+      }
+      const results = tracks.map((tr) => {
+        const cur = metaOf(tr!);
+        const row = { trackId: tr!.id, title: tr!.title, version: "v" + cur.version, outcome: "unchanged", reason: "", added: [] as Value[], removed: [] as Value[], primaryChanged: [] as string[], verified: [] as Value[] };
+        const copy: Meta = JSON.parse(JSON.stringify(cur));
+        if (verify) {
+          const listOf = (c: string): MetaLink[] => (c === "languages" ? [...copy.languages, ...(copy.languageUnknown && copy.unknownReview ? [copy.unknownReview] : [])] : ((copy as unknown as Record<string, MetaLink[]>)[c] ?? copy.attributes[c] ?? []));
+          for (const c of categories)
+            for (const l of listOf(c))
+              if (l.verification === "pending") {
+                Object.assign(l, { verification: "verified", verifiedBy: actorOf(actor), verifiedAt: new Date().toISOString() });
+                row.verified.push({ category: c, id: l.id });
+              }
+        } else {
+          if (copy.languageUnknown && changes.languages?.mode === "add") return { ...row, outcome: "skipped", reason: "language_unknown" };
+          const apply = (category: "languages" | "genres" | "regions", c: Change) => {
+            const flag = category === "languages" ? "role" : category === "genres" ? "primary" : null;
+            const isPrimary = (x: { role?: string; primary?: boolean }) => (flag === "role" ? x.role === "primary" : x.primary === true);
+            const wanted: { id: string; role?: string; primary?: boolean }[] = c.values ?? (c.ids ?? []).map((id) => ({ id }));
+            const old = copy[category];
+            const before = old.find((x) => flag && isPrimary(x))?.id;
+            const next = c.mode === "replace" ? [] : [...old];
+            for (const w of wanted) {
+              const was = old.find((x) => x.id === w.id);
+              if (c.mode === "add" && was) continue;
+              const demote = c.mode === "add" && flag && isPrimary(w) && next.some(isPrimary);
+              const value = demote ? { ...w, ...(flag === "role" ? { role: "secondary" } : { primary: false }) } : w;
+              next.push(was ? (was.role === value.role && was.primary === value.primary ? was : { ...was, ...value, verification: "pending" }) : { ...fresh("admin", w.id), ...value });
+            }
+            row.added.push(...next.filter((x) => !old.some((o) => o.id === x.id)).map((x) => ({ category, id: x.id })));
+            row.removed.push(...old.filter((o) => !next.some((x) => x.id === o.id)).map((x) => ({ category, id: x.id })));
+            if (flag && before !== next.find(isPrimary)?.id) row.primaryChanged.push(category);
+            copy[category] = next;
+          };
+          if (changes.languages) {
+            if (changes.languages.mode === "replace" && copy.languageUnknown) {
+              copy.languageUnknown = false;
+              copy.unknownReview = null;
+              row.removed.push({ category: "languageUnknown", id: "" });
+            }
+            apply("languages", changes.languages);
+          }
+          if (changes.genres) apply("genres", changes.genres);
+          if (changes.regions) apply("regions", changes.regions);
+        }
+        const touchedNow = JSON.stringify(copy) !== JSON.stringify(cur);
+        if (!touchedNow) return row;
+        row.outcome = "changed";
+        if (!dryRun) {
+          metas.set(tr!.id, { ...copy, version: cur.version + 1, touched: true, updatedAt: new Date().toISOString(), updatedBy: actorOf(actor) });
+          if (row.primaryChanged.includes("genres")) {
+            const primary = copy.genres.find((g) => g.primary);
+            tr!.genre = primary ? taxonomy.genres.find((g) => g.id === primary.id)!.label : "";
+          }
+          addAudit(actor, verify ? "track.metadata_verify" : "track.metadata_update", "track", tr!.id, tr!.title, "", { bulk: true });
+        }
+        return row;
+      });
+      const n = (o: string) => results.filter((r) => r.outcome === o).length;
+      return ok({ results, changed: n("changed"), unchanged: n("unchanged"), skipped: n("skipped") });
+    }
+    if (m === "GET" && p === "/metadata/tracks") {
+      const rows = state.tracks.flatMap((t) => {
+        const rel = state.releases.find((r) => r.id === t.releaseId);
+        if (!rel) return [];
+        if (q.get("artistId") && rel.artistId !== q.get("artistId")) return [];
+        if (q.get("releaseType") && rel.type !== q.get("releaseType")) return [];
+        const term = (q.get("q") ?? "").toLowerCase();
+        if (term && !t.title.toLowerCase().includes(term) && !rel.title.toLowerCase().includes(term)) return [];
+        return [metaView(t)];
+      });
+      const open = (l: { verification: string }[]) => l.some((x) => x.verification === "pending");
+      const tests: Record<string, (v: (typeof rows)[number]) => boolean> = {
+        pending_review: (v) => v.status === "pending_review",
+        no_language: (v) => !v.languageUnknown && !v.languages.some((x) => x.verification !== "rejected"),
+        unverified_language: (v) => open(v.languages) || (!!v.languageUnknownReview && open([v.languageUnknownReview])),
+        no_genre: (v) => !v.genres.some((x) => x.verification !== "rejected"),
+        culture_region_review: (v) => open(v.cultures) || open(v.regions),
+        incomplete: (v) => v.missingRequired.length > 0,
+      };
+      const test = tests[q.get("queue") ?? ""];
+      need(test, 400, "bad_request", "unknown queue");
+      const pg = pageOf(rows.filter(test!), q);
+      return ok({ total: pg.total, counts: Object.fromEntries(Object.entries(tests).map(([k, f]) => [k, rows.filter(f).length])), tracks: pg.rows.map((v) => ({ trackId: v.trackId, title: v.title, releaseId: v.release.id, releaseTitle: v.release.title, releaseType: v.release.type, artist: v.artist, status: v.status, missingRequired: v.missingRequired, languageUnknown: v.languageUnknown })) });
+    }
+    if ((mt = p.match(/^\/releases\/([^/]+)\/track-metadata$/)) && m === "GET") {
+      need(state.releases.some((x) => x.id === mt![1]), 404, "not_found", "release not found");
+      return ok({ releaseId: mt[1], tracks: releaseTracks(mt[1]!).sort((a, b) => (a.trackNumber ?? 0) - (b.trackNumber ?? 0)).map(metaView) });
+    }
+    if ((mt = p.match(/^\/tracks\/([^/]+)\/metadata$/)) && (m === "GET" || m === "PUT")) {
+      const t = state.tracks.find((x) => x.id === mt![1]);
+      need(t, 404, "not_found", "track not found");
+      if (m === "GET") return ok(metaView(t!));
+      const cur = metaOf(t!);
+      need(body.version === "v" + cur.version, 409, "stale_version", "the track was changed meanwhile");
+      const attrs = (body.attributes ?? {}) as Record<string, string[]>;
+      const merge = (old: MetaLink[], next: { id: string; role?: string; primary?: boolean }[], known: { id: string; active: boolean }[]) =>
+        next.map((n) => {
+          const was = old.find((o) => o.id === n.id);
+          const term = known.find((k) => k.id === n.id);
+          need(term && (term.active || was), 422, "invalid_taxonomy", "unknown or inactive choice: " + n.id);
+          if (!was) return { ...fresh("admin", n.id), ...n };
+          return was.role === n.role && was.primary === n.primary ? was : { ...was, ...n, verification: "pending", verifiedBy: null, verifiedAt: null };
+        });
+      const languages = (body.languages ?? []) as { id: string; role: string }[];
+      const genres = (body.genres ?? []) as { id: string; primary: boolean }[];
+      need(languages.filter((l) => l.role === "primary").length <= 1 && genres.filter((g) => g.primary).length <= 1, 422, "validation_error", "only one primary");
+      need(!(body.languageUnknown === true && languages.length > 0), 422, "validation_error", "unknown language excludes languages");
+      need((attrs.energy ?? []).length <= 1 && (attrs.danceability ?? []).length <= 1, 422, "validation_error", "one energy and one danceability value");
+      const next: Meta = {
+        languageUnknown: body.languageUnknown === true,
+        languages: merge(cur.languages, languages, taxonomy.languages),
+        cultures: merge(cur.cultures, ((body.cultures ?? []) as string[]).map((id) => ({ id })), taxonomy.cultures),
+        regions: merge(cur.regions, ((body.regions ?? []) as string[]).map((id) => ({ id })), taxonomy.regions),
+        genres: merge(cur.genres, genres, taxonomy.genres),
+        attributes: Object.fromEntries(Object.entries(taxonomy.attributes).map(([k, known]) => [k, merge(cur.attributes[k] ?? [], (attrs[k] ?? []).map((id) => ({ id })), known)])),
+        version: cur.version + 1, touched: true, updatedAt: new Date().toISOString(), updatedBy: actorOf(actor),
+      };
+      next.unknownReview = next.languageUnknown ? (cur.languageUnknown && cur.unknownReview ? cur.unknownReview : fresh("admin", "")) : null;
+      next.submittedAt = next.languageUnknown || next.languages.some((l) => l.verification !== "rejected") ? (cur.submittedAt ?? null) : null;
+      metas.set(t!.id, next);
+      const primary = next.genres.find((g) => g.primary);
+      if (primary) t!.genre = taxonomy.genres.find((g) => g.id === primary.id)!.label;
+      addAudit(actor, "track.metadata_update", "track", t!.id, t!.title);
+      return ok(metaView(t!));
+    }
     if (m === "GET" && p === "/releases") {
       const term = (q.get("q") ?? "").toLowerCase();
       let rows = state.releases.filter((r) => !term || r.title.toLowerCase().includes(term) || (state.artists.find((a) => a.id === r.artistId)?.name ?? "").toLowerCase().includes(term));
@@ -713,14 +1323,17 @@ export function createMock(opts: MockOptions = {}): Mock {
       if (q.get("takenDown") === "false") rows = rows.filter((r) => !r.takedown);
       if (q.get("artistId")) rows = rows.filter((r) => r.artistId === q.get("artistId"));
       if (q.get("type")) rows = rows.filter((r) => r.type === q.get("type"));
-      rows = [...rows].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      if (q.get("metadata")) rows = rows.filter((r) => releaseProgress(r).status === q.get("metadata"));
+      if (q.get("pendingReview") === "true") rows = rows.filter((r) => releaseProgress(r).pendingReview > 0);
+      if (q.get("featured") === "false") rows = rows.filter((r) => !featured.includes(r.id));
+      rows = q.get("featured") === "true" ? rows.filter((r) => featured.includes(r.id)).sort((a, b) => featured.indexOf(a.id) - featured.indexOf(b.id)) : [...rows].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       const pg = pageOf(rows, q);
       return ok({ total: pg.total, releases: pg.rows.map(releaseRow) });
     }
     if ((mt = p.match(/^\/releases\/([^/]+)$/)) && m === "GET") {
       const r = state.releases.find((x) => x.id === mt![1]);
       need(r, 404, "not_found", "release not found");
-      return ok({ uploads: uploadsOf(r!.id), releaseDate: r!.releaseDate, ...releaseRow(r!), description: r!.description, genre: r!.genre, publishAt: r!.publishAt ?? null, updatedAt: r!.createdAt, artist: { id: r!.artistId, name: state.artists.find((x) => x.id === r!.artistId)?.name ?? "", banned: !!state.artists.find((x) => x.id === r!.artistId)?.ban }, takedown: r!.takedown ? { at: r!.takedown.at, reason: r!.takedown.reason, by: { id: "usr_admin", email: MOCK_ADMIN_EMAIL }, previousVisibility: r!.prevVisibility ?? "draft", byBan: false } : null, tracks: releaseTracks(r!.id).map((t) => ({ id: t.id, title: t.title, trackNumber: t.trackNumber, durationMs: t.durationMs, visibility: r!.visibility === "public" ? "public" : "draft", explicit: t.explicit, genre: t.genre })) });
+      return ok({ uploads: uploadsOf(r!.id), ...releaseRow(r!), description: r!.description, genre: r!.genre, publishAt: r!.publishAt ?? null, updatedAt: r!.createdAt, artist: { id: r!.artistId, name: state.artists.find((x) => x.id === r!.artistId)?.name ?? "", banned: !!state.artists.find((x) => x.id === r!.artistId)?.ban }, takedown: r!.takedown ? { at: r!.takedown.at, reason: r!.takedown.reason, by: { id: "usr_admin", email: MOCK_ADMIN_EMAIL }, previousVisibility: r!.prevVisibility ?? "draft", byBan: false } : null, tracks: releaseTracks(r!.id).map((t) => ({ id: t.id, title: t.title, trackNumber: t.trackNumber, durationMs: t.durationMs, visibility: r!.visibility === "public" ? "public" : "draft", explicit: t.explicit, genre: t.genre })) });
     }
     if ((mt = p.match(/^\/releases\/([^/]+)$/)) && m === "PATCH") {
       const r = state.releases.find((x) => x.id === mt![1]);
@@ -898,7 +1511,20 @@ export function createMock(opts: MockOptions = {}): Mock {
       addAudit(actor, "apikey.revoke", "apikey", k!.id, k!.name);
       return none;
     }
-    if (p === "/imports" && m === "GET") return ok({ imports: [...jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 20).map((j) => jobView(j, false)) });
+    if (p === "/imports" && m === "GET") {
+      const newest = [...jobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const state = q.get("state");
+      need(state === null || state === "unfinished" || state === "finished", 400, "bad_request", "unknown state");
+      const live = (j: Job) => j.status === "pending" || j.status === "processing";
+      if (state === "finished") {
+        const done = newest.filter((j) => !live(j)).sort((a, b) => (b.finishedAt ?? b.createdAt).localeCompare(a.finishedAt ?? a.createdAt));
+        const limit = Math.min(100, Math.max(1, Number(q.get("limit") ?? 20) || 20));
+        const offset = Math.max(0, Number(q.get("offset") ?? 0) || 0);
+        return ok({ imports: done.slice(offset, offset + limit).map((j) => jobView(j, false)), total: done.length });
+      }
+      const rows = state === "unfinished" ? newest.filter(live) : newest.slice(0, 20);
+      return ok({ imports: rows.map((j) => jobView(j, false)) });
+    }
     if ((mt = p.match(/^\/imports\/([^/]+)$/))) {
       const j = jobs.find((x) => x.jobId === mt![1]);
       need(j, 404, "not_found", "no such import");
@@ -953,14 +1579,64 @@ export function createMock(opts: MockOptions = {}): Mock {
       }
       state.releases.push(rel);
       addAudit(actor, "release.create", "release", rel.id, rel.title, "", { artistId: a!.id });
-      return ok({ uploads: [], releaseDate: rel.releaseDate, ...releaseRow(rel), description: rel.description, genre: rel.genre, publishAt: null, updatedAt: rel.createdAt, artist: { id: a!.id, name: a!.name, banned: !!a!.ban }, takedown: null, tracks: [] }, 201);
+      return ok({ uploads: [], ...releaseRow(rel), description: rel.description, genre: rel.genre, publishAt: null, updatedAt: rel.createdAt, artist: { id: a!.id, name: a!.name, banned: !!a!.ban }, takedown: null, tracks: [] }, 201);
+    }
+    if ((mt = p.match(/^\/tracks\/([^/]+)\/single$/)) && m === "POST") {
+      const t = state.tracks.find((x) => x.id === mt![1]);
+      need(t, 404, "not_found", "track not found");
+      const from = state.releases.find((x) => x.id === t!.releaseId)!;
+      need(from.type !== "single", 409, "already_single", "it is already a single");
+      need(!state.artists.find((x) => x.id === from.artistId)?.ban, 409, "artist_banned", "this artist is banned");
+      need(!from.takedown, 409, "taken_down", "the release was taken down");
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      need(title.length >= 1 && title.length <= 200, 422, "validation_error", "title must be 1-200 characters");
+      const visibility = body.visibility === "public" ? "public" : "draft";
+      const made: Release = { ...from, id: "alb_single_" + randomBytes(6).toString("hex"), title, type: "single", visibility, genre: String(body.genre ?? from.genre), coverImageId: typeof body.coverImageId === "string" ? body.coverImageId : body.useAlbumCover === true ? from.coverImageId : undefined, createdAt: new Date().toISOString(), publishedAt: visibility === "public" ? new Date().toISOString() : undefined, publishAt: undefined };
+      state.releases.push(made);
+      t!.releaseId = made.id;
+      t!.trackNumber = 1;
+      const rest = releaseTracks(from.id);
+      if (rest.length === 0) state.releases.splice(state.releases.indexOf(from), 1);
+      else rest.forEach((x, i) => (x.trackNumber = i + 1));
+      addAudit(actor, "release.split", "release", made.id, title, "", { fromReleaseId: from.id, fromTitle: from.title, trackId: t!.id });
+      return ok({ uploads: [], ...releaseRow(made), description: "", genre: made.genre, publishAt: null, takedown: null, tracks: [] }, 201);
+    }
+    if (p === "/releases/combine" && m === "POST") {
+      const ids = Array.isArray(body.releaseIds) ? (body.releaseIds as string[]) : [];
+      need(ids.length >= 2 && new Set(ids).size === ids.length, 422, "validation_error", "choose at least two releases");
+      const old = ids.map((id) => state.releases.find((x) => x.id === id));
+      need(old.every(Boolean), 404, "not_found", "release not found");
+      const art = state.artists.find((x) => x.id === old[0]!.artistId)!;
+      need(old.every((r) => r!.artistId === art.id), 409, "different_artists", "the releases belong to different artists");
+      need(!art.ban, 409, "artist_banned", "this artist is banned");
+      need(old.every((r) => !r!.takedown), 409, "taken_down", "a release was taken down");
+      need(old.every((r) => releaseTracks(r!.id).length > 0), 409, "no_tracks", "a release has no tracks");
+      const songs = old.flatMap((r) => releaseTracks(r!.id));
+      const order = Array.isArray(body.trackIds) ? (body.trackIds as string[]) : [];
+      need(order.length === songs.length && songs.every((t) => order.includes(t.id)), 422, "validation_error", "trackIds must list every song once");
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      need(title.length >= 1 && title.length <= 200, 422, "validation_error", "title must be 1-200 characters");
+      const from = typeof body.coverFromReleaseId === "string" ? old.find((r) => r!.id === body.coverFromReleaseId) : undefined;
+      const visibility = body.visibility === "public" ? "public" : "draft";
+      const made: Release = { ...old[0]!, id: "alb_combined_" + randomBytes(6).toString("hex"), title, type: "album", visibility, genre: String(body.genre ?? ""), coverImageId: typeof body.coverImageId === "string" ? body.coverImageId : from?.coverImageId, createdAt: new Date().toISOString(), publishedAt: visibility === "public" ? new Date().toISOString() : undefined, publishAt: undefined };
+      state.releases.push(made);
+      for (const t of songs) {
+        t.releaseId = made.id;
+        t.trackNumber = order.indexOf(t.id) + 1;
+      }
+      for (const r of old) state.releases.splice(state.releases.indexOf(r!), 1);
+      addAudit(actor, "release.combine", "release", made.id, title, "", { from: old.map((r) => ({ id: r!.id, title: r!.title })) });
+      return ok({ uploads: [], ...releaseRow(made), description: "", genre: made.genre, publishAt: null, takedown: null, tracks: [] }, 201);
     }
     if ((mt = p.match(/^\/releases\/([^/]+)\/(publish|unpublish)$/)) && m === "POST") {
       const r = state.releases.find((x) => x.id === mt![1]);
       need(r, 404, "not_found", "release not found");
       need(!r!.takedown, 409, "taken_down", "this release was taken down; restore it first");
       if (mt[2] === "publish") {
+        need(!state.artists.find((x) => x.id === r!.artistId)?.ban, 409, "artist_banned", "this artist is banned");
+        need(!uploadsOf(r!.id).some((u) => u.status !== "failed"), 409, "uploads_pending", "some files are still uploading or processing; wait until they are ready");
         need(releaseTracks(r!.id).length > 0, 422, "no_tracks", "add at least one track before publishing");
+        need(r!.type !== "single" || releaseTracks(r!.id).length === 1, 422, "validation_error", "a single must have exactly one track (make it an album instead)");
         const at = typeof body.publishAt === "string" && body.publishAt ? Date.parse(body.publishAt) : NaN;
         if (Number.isFinite(at) && at > Date.now()) {
           r!.visibility = "scheduled";

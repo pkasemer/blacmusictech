@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { useState } from "react";
 import { usePageTitle } from "@/components/page-meta";
 import { DeleteDialog, ReasonDialog } from "@/components/Dialogs";
+import { PreferenceCard } from "@/components/PreferenceGraph";
+import { SuggestionsCard } from "@/components/Suggestions";
 import { useToast } from "@/components/Shell";
 import { Badge, Button, Card, ErrorBox, KV, Loading, PageHeader } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -18,12 +20,26 @@ export default function UserPage() {
   const toast = useToast();
   const q = useApi<UserDetail>(`/users/${id}`);
   const [dlg, setDlg] = useState<"ban" | "unban" | "delete" | null>(null);
+  const [marking, setMarking] = useState(false);
   const u = q.data;
   usePageTitle(u?.displayName, "user");
   const isAdmin = u?.role === "admin";
 
   if (q.error) return <ErrorBox error={q.error} onRetry={q.reload} />;
   if (!u) return <Loading />;
+
+  const setSignals = async (excluded: boolean) => {
+    setMarking(true);
+    try {
+      await api(`/users/${u.id}/signals`, { method: "PUT", body: { excluded } });
+      toast(excluded ? "Left out of recommendations" : "Counted in recommendations again");
+      q.reload();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Couldn't save", "error");
+    } finally {
+      setMarking(false);
+    }
+  };
 
   return (
     <>
@@ -61,6 +77,24 @@ export default function UserPage() {
               ["Push notifications", u.pushEnabled ? "On" : "Off"],
             ]}
           />
+          {u.signalsExcluded !== undefined && (
+            <div className="mt-3 border-t pt-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">Recommendation signals</span>
+                {u.signalsExcluded ? <Badge tone="amber">Left out</Badge> : <Badge tone="green">Counted</Badge>}
+                {!isAdmin && (
+                  <Button disabled={marking} onClick={() => setSignals(!u.signalsExcluded)}>
+                    {u.signalsExcluded ? "Count this account" : "Mark as staff or test account"}
+                  </Button>
+                )}
+              </div>
+              <p className="mt-1 text-muted">
+                {isAdmin
+                  ? "Administrators are always left out."
+                  : "Leave out staff and test accounts, so their listening, likes and follows don't shape what other listeners are offered. The account itself works as before."}
+              </p>
+            </div>
+          )}
         </Card>
         <Card title="Activity">
           <KV
@@ -72,6 +106,12 @@ export default function UserPage() {
             ]}
           />
         </Card>
+      </div>
+      <div className="mt-4">
+        <PreferenceCard key={u.id} userId={u.id} name={u.displayName} />
+      </div>
+      <div className="mt-4">
+        <SuggestionsCard key={u.id} userId={u.id} name={u.displayName} />
       </div>
 
       <ReasonDialog
@@ -111,7 +151,7 @@ export default function UserPage() {
         previewPath={`/users/${u.id}/deletion-preview`}
         describe={(p) => [
           `The account ${u.email} and ${p.sessions} sign-in session${p.sessions === 1 ? "" : "s"}`,
-          p.artist ? `The artist profile "${p.artist.name}"` : "No artist profile",
+          !p.artist ? "No artist profile" : p.artist.returnsToCatalog ? `Not deleted: the artist "${p.artist.name}" returns to the catalog with the songs your team uploaded` : `The artist profile "${p.artist.name}"`,
           `${p.releases} release${p.releases === 1 ? "" : "s"} with ${p.tracks} track${p.tracks === 1 ? "" : "s"} and their audio files (${fmtBytes(p.storageBytes)})`,
           `${p.playlists} playlist${p.playlists === 1 ? "" : "s"}, ${p.libraryItems} saved library item${p.libraryItems === 1 ? "" : "s"} and ${p.uploads} unfinished upload${p.uploads === 1 ? "" : "s"}`,
         ]}

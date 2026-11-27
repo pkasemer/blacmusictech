@@ -6,6 +6,7 @@ export class ApiError extends Error {
     public code: string,
     message: string,
     public retryAfter?: number,
+    public details?: unknown,
   ) {
     super(message);
   }
@@ -52,12 +53,12 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     data = undefined;
   }
   if (!res.ok) {
-    const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error;
+    const err = (data as { error?: { code?: string; message?: string; details?: unknown } } | undefined)?.error;
     const code = err?.code ?? "error";
     if (res.status === 401 && code !== "invalid_credentials") onSignedOut();
     if (res.status === 403 && (code === "forbidden" || code === "account_banned")) onSignedOut();
     const retry = Number(res.headers.get("retry-after") ?? "");
-    throw new ApiError(res.status, code, err?.message ?? `Request failed (${res.status})`, Number.isFinite(retry) ? retry : undefined);
+    throw new ApiError(res.status, code, err?.message ?? `Request failed (${res.status})`, Number.isFinite(retry) ? retry : undefined, err?.details);
   }
   return data as T;
 }
